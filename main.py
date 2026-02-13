@@ -34,25 +34,35 @@ async def verify_webhook(request: Request):
     )
 
 
+import json
+from datetime import datetime
+
+
 @app.post("/webhook")
 async def receive_message(request: Request):
-    """
-    Handles incoming webhook events (messages, etc.)
-    """
-    data = await request.json()
 
-    # Check if this is an Instagram event
+    # Get raw body first
+    raw_body = await request.body()
+
+    # Convert to JSON
+    try:
+        data = json.loads(raw_body)
+    except Exception:
+        print("⚠️ Failed to parse JSON")
+        print(raw_body)
+        return {"status": "BAD_JSON"}
+
+    # 🔥 FULL RAW LOG
+    print("\n================ WEBHOOK EVENT ================")
+    print("Timestamp:", datetime.utcnow().isoformat())
+    print(json.dumps(data, indent=2))
+    print("==============================================\n")
+
+    # optional filtering later
     if data.get("object") == "instagram":
-        # Process the entries (you usually get a batch)
-        for entry in data.get("entry", []):
-            messaging_events = entry.get("messaging", [])
-            for event in messaging_events:
-                print(f"Received event: {event}")
-                # TODO: Add logic to save to DB or trigger Stripe flow
-
         return {"status": "EVENT_RECEIVED"}
 
-    raise HTTPException(status_code=404, detail="Not an Instagram event")
+    return {"status": "IGNORED"}
 
 
 if __name__ == "__main__":
