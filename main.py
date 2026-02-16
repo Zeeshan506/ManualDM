@@ -2,14 +2,14 @@ import hashlib
 import json
 import os
 from datetime import datetime
-
+from dotenv import load_dotenv
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 app = FastAPI()
-
+load_dotenv()
 # Configuration (Store these in environment variables later)
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
 RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./webhook_events.db")
@@ -26,7 +26,9 @@ def _with_sslmode(url: str) -> str:
 
 
 DATABASE_URL = _with_sslmode(RAW_DATABASE_URL)
-
+print(
+    f"Using database URL: {DATABASE_URL} (derived from raw: {RAW_DATABASE_URL})"
+)
 # SQLAlchemy setup
 engine = create_engine(
     DATABASE_URL,
