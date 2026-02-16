@@ -1,4 +1,7 @@
-from sqlalchemy import JSON, Column, DateTime, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, JSON, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import relationship
 
 from database import Base
 
@@ -13,4 +16,38 @@ class WebhookEvent(Base):
     raw_payload = Column(JSON, nullable=True)
     raw_body = Column(Text, nullable=True)
     fingerprint = Column(String, nullable=True, index=True)
-# *** End Patch
+
+
+class Lead(Base):
+    __tablename__ = "leads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    instagram_user_id = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    dedup_key = Column(String, nullable=True, index=True)
+    flow_step = Column(String, nullable=False, default="new")
+    status = Column(String, nullable=False, default="new")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+    last_message_at = Column(DateTime(timezone=True), nullable=True)
+
+    inbound_messages = relationship("InboundMessage", back_populates="lead")
+
+
+class InboundMessage(Base):
+    __tablename__ = "inbound_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=True, index=True)
+    instagram_user_id = Column(String, nullable=False, index=True)
+    platform_message_id = Column(String, nullable=True, index=True)
+    text_raw = Column(Text, nullable=True)
+    text_cleaned = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    processed = Column(Boolean, nullable=False, default=False, index=True)
+    received_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    lead = relationship("Lead", back_populates="inbound_messages")

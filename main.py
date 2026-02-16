@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 from datetime import datetime
-
+from utils import compute_fingerprint, _strip_volatile, automation_mail, _extract_inbound_sender_id
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
 
 # Initialize database (creates tables in dev/sqlite; safe for Postgres if already migrated)
 init_db()
+
 
 
 @app.get("/webhook")
@@ -45,27 +46,6 @@ async def verify_webhook(request: Request):
         status_code=status.HTTP_400_BAD_REQUEST, detail="Missing parameters"
     )
 
-
-VOLATILE_KEYS = {"timestamp", "time", "sent_time", "created_time", "sent_at"}
-
-
-def _strip_volatile(obj):
-    if isinstance(obj, dict):
-        return {k: _strip_volatile(v) for k, v in obj.items() if k not in VOLATILE_KEYS}
-    if isinstance(obj, list):
-        return [_strip_volatile(v) for v in obj]
-    return obj
-
-
-def compute_fingerprint(payload):
-    if not isinstance(payload, (dict, list)):
-        return None
-    try:
-        stable = _strip_volatile(payload)
-        serialized = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    except Exception:
-        return None
 
 
 @app.post("/webhook")
@@ -126,6 +106,14 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         except Exception:
             db.rollback()
             raise
+
+    if status_tag == "EVENT_RECEIVED" and isinstance(data, dict):
+        sender_id = _extract_inbound_sender_id(data)
+        if sender_id:
+            try:
+                automation_mail(sender_id)
+            except Exception as exc:
+                print(f"⚠️ Failed to send automated message: {exc}")
 
     if status_tag == "BAD_JSON":
         return {"status": "BAD_JSON"}
