@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from utils import compute_fingerprint, _strip_volatile, automation_mail, _extract_inbound_sender_id
+from utils import compute_fingerprint, _strip_volatile, automation_mail, upsert_lead_from_payload
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -108,8 +108,14 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
             raise
 
     if status_tag == "EVENT_RECEIVED" and isinstance(data, dict):
-        sender_id = _extract_inbound_sender_id(data)
-        if sender_id:
+        lead_result = upsert_lead_from_payload(data, db)
+        if lead_result:
+            action = "created" if lead_result.get("created") else "updated"
+            print(
+                f"Lead {action}: id={lead_result.get('lead_id')} instagram_user_id={lead_result.get('instagram_user_id')}"
+            )
+        if lead_result and lead_result.get("created"):
+            sender_id = lead_result.get("instagram_user_id")
             try:
                 result = automation_mail(sender_id)
                 print(f"Automation mail result for PSID {sender_id}: {result}")

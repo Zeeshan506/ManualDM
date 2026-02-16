@@ -3,6 +3,9 @@ import json
 import requests
 from dotenv import load_dotenv
 import os
+from datetime import datetime
+from sqlalchemy.orm import Session
+from models import Lead
 load_dotenv()
 
 VOLATILE_KEYS = {"timestamp", "time", "sent_time", "created_time", "sent_at"}
@@ -61,6 +64,76 @@ def fetch_user_info():
     """
 
     pass
+
+
+def _extract_inbound_message_text(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    entries = payload.get("entry") or []
+    for entry in entries:
+        messaging_events = entry.get("messaging") or []
+        for event in messaging_events:
+            message = event.get("message") or {}
+            text = message.get("text")
+            if isinstance(text, str):
+                return text
+
+        changes = entry.get("changes") or []
+        for change in changes:
+            value = change.get("value") or {}
+            messages = value.get("messages") or []
+            for message in messages:
+                text = (message.get("text") or {}).get("body")
+                if isinstance(text, str):
+                    return text
+
+    return None
+
+
+def upsert_lead_from_payload(payload, db: Session):
+    sender_id = _extract_inbound_sender_id(payload)
+    if not sender_id:
+        return None
+
+    message_text = _extract_inbound_message_text(payload)
+    now = datetime.utcnow()
+
+    try:
+        lead = db.query(Lead).filter(Lead.instagram_user_id == str(sender_id)).first()
+
+        if lead:
+            lead.updated_at = now
+            lead.last_message_at = now
+            if not lead.status:
+                lead.status = "new"
+            if not lead.flow_step:
+                lead.flow_step = "new"
+            created = False
+        else:
+            lead = Lead(
+                instagram_user_id=str(sender_id),
+                status="new",
+                flow_step="new",
+                created_at=now,
+                updated_at=now,
+                last_message_at=now,
+            )
+            db.add(lead)
+            created = True
+
+        db.commit()
+        db.refresh(lead)
+
+        return {
+            "lead_id": lead.id,
+            "instagram_user_id": lead.instagram_user_id,
+            "created": created,
+            "last_message_text": message_text,
+        }
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _strip_volatile(obj):
