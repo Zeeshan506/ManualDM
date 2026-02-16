@@ -1,7 +1,9 @@
 import requests
 from dotenv import load_dotenv
 import os
+from database import get_db
 load_dotenv()
+
 
 ACCESS_TOKEN = os.getenv("IG_ACCESS_TOKEN_ZESHAN6A")
 
@@ -31,4 +33,5 @@ def fetch_user_info():
     will fetch user info from the database and return it as a list of dictionaries.
     will include the psid of the sender, users info will be taken from env.
     """
+
     pass
