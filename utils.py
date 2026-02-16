@@ -28,8 +28,13 @@ def automation_mail(psid, access_token = ACCESS_TOKEN):
     }
     data = {"message": {"text": "Hello from your IG Pro account!"}}
     print(f"Sending automation message to PSID {psid}")
-    response = requests.post(api_url, headers=headers, json=data)
-    return response.status_code
+    try:
+        response = requests.post(api_url, headers=headers, json=data)
+        response.raise_for_status()
+        print(f"Message sent successfully to PSID {psid}")
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to send message to PSID {psid}: {e}")
+        return None
 
 def fetch_user_info():
     """
