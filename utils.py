@@ -21,13 +21,13 @@ def automation_mail(psid, access_token = ACCESS_TOKEN):
     will send a message to the user with the given psid using the Instagram Graph API.
     """
 
-    api_url = f"https://graph.facebook.com/v12.0/{psid}/messages"
+    api_url = f"https://graph.facebook.com/v24.0/{psid}/messages"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {access_token}",
     }
     data = {"message": {"text": "Hello from your IG Pro account!"}}
-    print(f"Sending automation message to PSID {psid} with access token {access_token}")
+    print(f"Sending automation message to PSID {psid}")
     response = requests.post(api_url, headers=headers, json=data)
     return response.status_code
 
