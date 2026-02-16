@@ -111,7 +111,8 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         sender_id = _extract_inbound_sender_id(data)
         if sender_id:
             try:
-                automation_mail(sender_id)
+                result = automation_mail(sender_id)
+                print(f"Automation mail result for PSID {sender_id}: {result}")
             except Exception as exc:
                 print(f"⚠️ Failed to send automated message: {exc}")
 
