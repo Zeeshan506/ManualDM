@@ -12,12 +12,26 @@ app = FastAPI()
 
 # Configuration (Store these in environment variables later)
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./webhook_events.db")
+RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./webhook_events.db")
+
+
+def _with_sslmode(url: str) -> str:
+    """Ensure Postgres connections use SSL when talking to Supabase."""
+    if not url.startswith("postgresql"):
+        return url
+    if "sslmode=" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}sslmode=require"
+
+
+DATABASE_URL = _with_sslmode(RAW_DATABASE_URL)
 
 # SQLAlchemy setup
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+    pool_pre_ping=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -39,7 +53,9 @@ Base.metadata.create_all(bind=engine)
 
 
 def ensure_schema():
-    # Add fingerprint column if it does not exist (helpful for already-created DBs)
+    """SQLite-only backfill for older local databases."""
+    if engine.url.get_backend_name() != "sqlite":
+        return
     with engine.connect() as conn:
         existing_cols = {
             row[1] for row in conn.exec_driver_sql("PRAGMA table_info('webhook_events')").fetchall()
