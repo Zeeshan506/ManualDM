@@ -2,82 +2,22 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from dotenv import load_dotenv
+
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from sqlalchemy import JSON, Column, DateTime, Integer, String, Text, create_engine
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import Session
+
+from database import get_db, init_db
+from models import WebhookEvent
+
 
 app = FastAPI()
-load_dotenv()
-# Configuration (Store these in environment variables later)
+
+# Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
-RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./webhook_events.db")
 
-
-def _with_sslmode(url: str) -> str:
-    """Ensure Postgres connections use SSL when talking to Supabase."""
-    if not url.startswith("postgresql"):
-        return url
-    if "sslmode=" in url:
-        return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}sslmode=require"
-
-
-DATABASE_URL = _with_sslmode(RAW_DATABASE_URL)
-print(
-    f"Using database URL: {DATABASE_URL} (derived from raw: {RAW_DATABASE_URL})"
-)
-# SQLAlchemy setup
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-    pool_pre_ping=True,
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-class WebhookEvent(Base):
-    __tablename__ = "webhook_events"
-
-    id = Column(Integer, primary_key=True, index=True)
-    received_at = Column(DateTime(timezone=True), nullable=False)
-    object = Column(String, nullable=True)
-    status = Column(String, nullable=False)
-    raw_payload = Column(JSON, nullable=True)
-    raw_body = Column(Text, nullable=True)
-    fingerprint = Column(String, nullable=True, index=True)
-
-
-Base.metadata.create_all(bind=engine)
-
-
-def ensure_schema():
-    """SQLite-only backfill for older local databases."""
-    if engine.url.get_backend_name() != "sqlite":
-        return
-    with engine.connect() as conn:
-        existing_cols = {
-            row[1] for row in conn.exec_driver_sql("PRAGMA table_info('webhook_events')").fetchall()
-        }
-        if "fingerprint" not in existing_cols:
-            conn.exec_driver_sql("ALTER TABLE webhook_events ADD COLUMN fingerprint TEXT")
-        conn.exec_driver_sql(
-            "CREATE INDEX IF NOT EXISTS idx_webhook_events_fingerprint ON webhook_events(fingerprint)"
-        )
-
-
-ensure_schema()
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Initialize database (creates tables in dev/sqlite; safe for Postgres if already migrated)
+init_db()
 
 
 @app.get("/webhook")
