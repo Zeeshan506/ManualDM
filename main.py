@@ -2,7 +2,14 @@ import hashlib
 import json
 import os
 from datetime import datetime
-from utils import compute_fingerprint, _strip_volatile, automation_mail, upsert_lead_from_payload
+from utils import (
+    automation_mail,
+    upsert_lead_from_payload,
+    track_inbound_chat_history,
+    append_chat_message,
+)
+from services.webhook_events import persist_webhook_event
+from services.event_handlers import handle_event_received
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -72,55 +79,14 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         print(raw_body_text)
     print("==============================================\n")
 
-    fingerprint = compute_fingerprint(data) if data is not None else None
+    # Persist the raw event and get a summary back
+    persisted = persist_webhook_event(raw_body_text, data, db)
+    status_tag = persisted.get("status_tag")
 
-    # Try to merge with an existing event that looks identical after stripping volatile fields
-    existing_event = None
-    if fingerprint:
-        existing_event = db.query(WebhookEvent).filter(WebhookEvent.fingerprint == fingerprint).first()
-
-    if existing_event:
-        existing_event.received_at = datetime.utcnow()
-        existing_event.object = data.get("object") if isinstance(data, dict) else existing_event.object
-        existing_event.status = status_tag
-        existing_event.raw_payload = data if isinstance(data, (dict, list)) else existing_event.raw_payload
-        existing_event.raw_body = raw_body_text
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-    else:
-        event = WebhookEvent(
-            received_at=datetime.utcnow(),
-            object=data.get("object") if isinstance(data, dict) else None,
-            status=status_tag,
-            raw_payload=data if isinstance(data, (dict, list)) else None,
-            raw_body=raw_body_text,
-            fingerprint=fingerprint,
-        )
-
-        try:
-            db.add(event)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-
+    # If this is an actual event for processing, handle business logic
     if status_tag == "EVENT_RECEIVED" and isinstance(data, dict):
-        lead_result = upsert_lead_from_payload(data, db)
-        if lead_result:
-            action = "created" if lead_result.get("created") else "updated"
-            print(
-                f"Lead {action}: id={lead_result.get('lead_id')} instagram_user_id={lead_result.get('instagram_user_id')}"
-            )
-        if lead_result and lead_result.get("created"):
-            sender_id = lead_result.get("instagram_user_id")
-            try:
-                result = automation_mail(sender_id)
-                print(f"Automation mail result for PSID {sender_id}: {result}")
-            except Exception as exc:
-                print(f"⚠️ Failed to send automated message: {exc}")
+        # Use the extracted orchestration helper to keep main.py thin
+        handler_summary = handle_event_received(data, db)
 
     if status_tag == "BAD_JSON":
         return {"status": "BAD_JSON"}

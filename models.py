@@ -26,7 +26,7 @@ class Lead(Base):
     name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
-    dedup_key = Column(String, nullable=True, index=True)
+    referral_id = Column(Text, nullable=True, index=True)
     flow_step = Column(String, nullable=False, default="new")
     status = Column(String, nullable=False, default="new")
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
@@ -34,6 +34,7 @@ class Lead(Base):
     last_message_at = Column(DateTime(timezone=True), nullable=True)
 
     inbound_messages = relationship("InboundMessage", back_populates="lead")
+    chat_messages = relationship("ChatMessage", back_populates="lead", cascade="all, delete-orphan")
 
 
 class InboundMessage(Base):
@@ -51,3 +52,18 @@ class InboundMessage(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     lead = relationship("Lead", back_populates="inbound_messages")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False, index=True)
+    instagram_user_id = Column(String, nullable=False, index=True)
+    direction = Column(String, nullable=False, index=True)  # inbound | outbound
+    message_text = Column(Text, nullable=True)
+    platform_message_id = Column(String, nullable=True, index=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    lead = relationship("Lead", back_populates="chat_messages")
