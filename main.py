@@ -41,7 +41,6 @@ async def verify_webhook(request: Request):
     if mode and token:
         if mode == "subscribe" and token == VERIFY_TOKEN:
             print("WEBHOOK_VERIFIED")
-            # Return the challenge string as a plain integer/text, not JSON
             return int(challenge)
         else:
             raise HTTPException(
@@ -70,7 +69,6 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         print("⚠️ Failed to parse JSON")
         print(raw_body_text)
 
-    # 🔥 FULL RAW LOG
     print("\n================ WEBHOOK EVENT ================")
     print("Timestamp:", datetime.utcnow().isoformat())
     if data is not None:
@@ -79,13 +77,10 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         print(raw_body_text)
     print("==============================================\n")
 
-    # Persist the raw event and get a summary back
     persisted = persist_webhook_event(raw_body_text, data, db)
     status_tag = persisted.get("status_tag")
 
-    # If this is an actual event for processing, handle business logic
     if status_tag == "EVENT_RECEIVED" and isinstance(data, dict):
-        # Use the extracted orchestration helper to keep main.py thin
         handler_summary = handle_event_received(data, db)
 
     if status_tag == "BAD_JSON":

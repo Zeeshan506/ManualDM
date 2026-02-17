@@ -8,7 +8,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from models import ChatMessage, Lead
+from models import Message, Contact, Lead
 
 load_dotenv()
 
@@ -35,7 +35,7 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
     Send an automated Instagram message to the given PSID using Graph API.
 
     Args:
-        psid: Instagram recipient id.
+        psid: Instagram recipient id (IGSID).
         message_text: Optional override for auto-reply text. If omitted, IG_AUTOREPLY_TEXT is used.
 
     Returns:
@@ -70,7 +70,7 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as exc:
-        print(f"Failed to send message to PSID {psid}: {exc}")
+        print(f"Failed to send message to IGSID {psid}: {exc}")
         return None
 
 
@@ -82,27 +82,31 @@ def fetch_user_info(db: Optional[Session] = None) -> List[Dict[str, Any]]:
     Fetch user info list.
 
     Behavior:
-      - If a SQLAlchemy Session is provided, query the Lead table and return basic records.
+      - If a SQLAlchemy Session is provided, query the Contact table and return basic records.
       - Otherwise, attempt to read IG_MONITORED_USERS env var. Supported formats:
           * JSON array of objects -> returned as-is
-          * Comma-separated list of PSIDs -> returned as [{"instagram_user_id": id}, ...]
+          * Comma-separated list of IGSIDs -> returned as [{"igsid": id}, ...]
 
     Returns:
         List of dictionaries describing users.
     """
     if db:
         try:
-            rows = db.query(Lead).all()
-            return [
-                {
-                    "lead_id": r.id,
-                    "instagram_user_id": r.instagram_user_id,
-                    "status": r.status,
-                    "flow_step": r.flow_step,
-                    "last_message_at": r.last_message_at,
-                }
-                for r in rows
-            ]
+            rows = db.query(Contact).all()
+            result = []
+            for c in rows:
+                lead = c.lead
+                result.append(
+                    {
+                        "contact_id": c.id,
+                        "lead_id": lead.id if lead else None,
+                        "igsid": c.igsid,
+                        "status": lead.status if lead else None,
+                        "flow_step": None,
+                        "last_message_at": c.last_message_at,
+                    }
+                )
+            return result
         except Exception:
             return []
 
@@ -119,8 +123,8 @@ def fetch_user_info(db: Optional[Session] = None) -> List[Dict[str, Any]]:
     except Exception:
         pass
 
-    # Fallback: comma separated PSIDs
-    return [{"instagram_user_id": p.strip()} for p in raw.split(",") if p.strip()]
+    # Fallback: comma separated IGSIDs
+    return [{"igsid": p.strip()} for p in raw.split(",") if p.strip()]
 
 
 # -----------------------------
@@ -152,7 +156,7 @@ def _extract_inbound_message_text(payload: Any) -> Optional[str]:
 
 def _extract_inbound_sender_id(payload: Any) -> Optional[str]:
     """
-    Extract the sender id from a webhook payload.
+    Extract the sender id (IGSID) from a webhook payload.
 
     Returns the first non-echo sender id found.
     """
@@ -177,7 +181,7 @@ def _extract_inbound_sender_id(payload: Any) -> Optional[str]:
 def _extract_inbound_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Normalize inbound messages from payload into a list of dicts:
-      { instagram_user_id, message_text, platform_message_id, payload }
+      { igsid, message_text, platform_message_id, payload }
     """
     if not isinstance(payload, dict):
         return []
@@ -185,14 +189,14 @@ def _extract_inbound_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     extracted: List[Dict[str, Any]] = []
     for entry in payload.get("entry", []):
         for event in entry.get("messaging", []):
-            sender_id = ((event.get("sender") or {}).get("id"))
+            sender_id = (event.get("sender") or {}).get("id")
             message = event.get("message") or {}
             text = message.get("text")
             mid = message.get("mid")
             if sender_id and (text is not None or mid is not None):
                 extracted.append(
                     {
-                        "instagram_user_id": str(sender_id),
+                        "igsid": str(sender_id),
                         "message_text": text,
                         "platform_message_id": mid,
                         "payload": event,
@@ -208,7 +212,7 @@ def _extract_inbound_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if sender_id and (text is not None or mid is not None):
                     extracted.append(
                         {
-                            "instagram_user_id": str(sender_id),
+                            "igsid": str(sender_id),
                             "message_text": text,
                             "platform_message_id": mid,
                             "payload": msg,
@@ -251,9 +255,9 @@ def compute_fingerprint(payload: Any) -> Optional[str]:
 # -----------------------------
 def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[Dict[str, Any]]:
     """
-    Create or update a Lead based on incoming payload sender id.
+    Create or update a Lead (and Contact) based on incoming payload sender id.
 
-    Returns a dict with lead_id, instagram_user_id, created (bool) and last_message_text.
+    Returns a dict with lead_id, igsid, created (bool) and last_message_text.
     """
     sender_id = _extract_inbound_sender_id(payload)
     if not sender_id:
@@ -263,31 +267,43 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
     now = datetime.utcnow()
 
     try:
-        lead = db.query(Lead).filter(Lead.instagram_user_id == str(sender_id)).first()
-        if lead:
-            lead.updated_at = now
-            lead.last_message_at = now
-            lead.status = lead.status or "new"
-            lead.flow_step = lead.flow_step or "new"
-            created = False
+        contact = db.query(Contact).filter(Contact.igsid == str(sender_id)).first()
+        if contact:
+            contact.last_message_at = now
+            created_contact = False
         else:
-            lead = Lead(
-                instagram_user_id=str(sender_id),
-                status="new",
-                flow_step="new",
+            contact = Contact(
+                igsid=str(sender_id),
+                referral_id=None,
+                platform="instagram",
                 created_at=now,
-                updated_at=now,
                 last_message_at=now,
             )
+            db.add(contact)
+            db.flush()  # ensure id assigned for FK
+            created_contact = True
+
+        # Ensure a Lead exists for this contact (lead created when qualified)
+        if contact.lead:
+            lead = contact.lead
+            created_lead = False
+        else:
+            lead = Lead(
+                contact_id=contact.id,
+                status="new",
+                created_at=now,
+            )
             db.add(lead)
-            created = True
+            created_lead = True
 
         db.commit()
+        # refresh to get ids
+        db.refresh(contact)
         db.refresh(lead)
         return {
             "lead_id": lead.id,
-            "instagram_user_id": lead.instagram_user_id,
-            "created": created,
+            "igsid": contact.igsid,
+            "created": created_lead,
             "last_message_text": message_text,
         }
     except Exception:
@@ -298,63 +314,101 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
 def append_chat_message(
     db: Session,
     *,
-    lead_id: int,
-    instagram_user_id: str,
+    igsid: str,
     direction: str,
     message_text: Optional[str] = None,
     platform_message_id: Optional[str] = None,
     payload: Optional[Any] = None,
-) -> ChatMessage:
+) -> Message:
     """
-    Append a single ChatMessage row and return it.
+    Append a single Message row and return it.
+
+    Args:
+        db: Database session
+        igsid: Instagram Sender ID (links to Contact if exists)
+        direction: 'inbound' or 'outbound'
+        message_text: Optional message text
+        platform_message_id: Optional platform message ID
+        payload: Optional raw payload data
     """
-    row = ChatMessage(
-        lead_id=lead_id,
-        instagram_user_id=str(instagram_user_id),
-        direction=direction,
-        message_text=message_text,
-        platform_message_id=platform_message_id,
-        payload=payload,
-        created_at=datetime.utcnow(),
-    )
+    now = datetime.utcnow()
     try:
-        db.add(row)
+        contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
+        if not contact:
+            contact = Contact(
+                igsid=str(igsid),
+                platform="instagram",
+                created_at=now,
+                last_message_at=now,
+            )
+            db.add(contact)
+            db.flush()
+
+        msg = Message(
+            contact_id=contact.id,
+            direction=direction,
+            text_raw=message_text,
+            platform_message_id=platform_message_id,
+            payload=payload,
+            created_at=now,
+        )
+        db.add(msg)
+        contact.last_message_at = now
         db.commit()
-        db.refresh(row)
-        return row
+        db.refresh(msg)
+        return msg
     except Exception:
         db.rollback()
         raise
 
 
-def track_inbound_chat_history(payload: Dict[str, Any], lead_id: int, instagram_user_id: str, db: Session) -> int:
+def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session) -> int:
     """
-    Persist inbound messages from payload for the given lead/instagram_user_id.
+    Persist inbound messages from payload for the given IGSID.
+
+    Args:
+        payload: Webhook payload containing messages
+        igsid: Instagram Sender ID
+        db: Database session
 
     Returns:
-        Number of created ChatMessage rows.
+        Number of created Message rows.
     """
     inbound = _extract_inbound_messages(payload)
     if not inbound:
         return 0
 
     created = 0
+    now = datetime.utcnow()
     try:
-        for msg in inbound:
-            if str(msg["instagram_user_id"]) != str(instagram_user_id):
-                continue
-            db.add(
-                ChatMessage(
-                    lead_id=lead_id,
-                    instagram_user_id=str(instagram_user_id),
-                    direction="inbound",
-                    message_text=msg.get("message_text"),
-                    platform_message_id=msg.get("platform_message_id"),
-                    payload=msg.get("payload"),
-                    created_at=datetime.utcnow(),
-                )
+        contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
+        if not contact:
+            contact = Contact(
+                igsid=str(igsid),
+                platform="instagram",
+                created_at=now,
+                last_message_at=now,
             )
+            db.add(contact)
+            db.flush()
+
+        for msg in inbound:
+            if str(msg["igsid"]) != str(igsid):
+                continue
+            m = Message(
+                contact_id=contact.id,
+                direction="inbound",
+                text_raw=msg.get("message_text"),
+                platform_message_id=msg.get("platform_message_id"),
+                payload=msg.get("payload"),
+                created_at=now,
+            )
+            db.add(m)
             created += 1
+
+        if created:
+            contact.last_message_at = now
+
         db.commit()
         return created
     except Exception:

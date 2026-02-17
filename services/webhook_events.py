@@ -1,52 +1,52 @@
 from datetime import datetime
 from typing import Any
 from sqlalchemy.orm import Session
-import json
 
-from utils import compute_fingerprint
 from models import WebhookEvent
 
 
 def persist_webhook_event(raw_body_text: str, data: Any, db: Session) -> dict:
-    """Persist or update a WebhookEvent and return a summary dict.
+    """
+    Persist a WebhookEvent using the schema from models.WebhookEvent.
 
-    Preserves the exact fields and commit/rollback behavior from the original
-    implementation in `main.py`.
+    Returns a summary dict with keys: status_tag, event_id, existing (always False here).
     """
     status_tag = "EVENT_RECEIVED" if isinstance(data, dict) and data.get("object") == "instagram" else "IGNORED"
 
-    fingerprint = compute_fingerprint(data) if data is not None else None
+    source = data.get("object") if isinstance(data, dict) else None
+    event_type = status_tag
 
-    existing_event = None
-    if fingerprint:
-        existing_event = db.query(WebhookEvent).filter(WebhookEvent.fingerprint == fingerprint).first()
-
-    if existing_event:
-        existing_event.received_at = datetime.utcnow()
-        existing_event.object = data.get("object") if isinstance(data, dict) else existing_event.object
-        existing_event.status = status_tag
-        existing_event.raw_payload = data if isinstance(data, (dict, list)) else existing_event.raw_payload
-        existing_event.raw_body = raw_body_text
-        try:
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-        return {"status_tag": status_tag, "fingerprint": fingerprint, "existing": True, "event_id": existing_event.id}
+    # Try to extract an external event id (message id) when available
+    external_event_id = None
+    try:
+        if isinstance(data, dict):
+            entries = data.get("entry", [])
+            if entries:
+                first = entries[0]
+                if first.get("messaging"):
+                    evt = first["messaging"][0]
+                    external_event_id = (evt.get("message") or {}).get("mid")
+                elif first.get("changes"):
+                    change_value = first["changes"][0].get("value", {})
+                    msg = (change_value.get("messages") or [{}])[0]
+                    external_event_id = msg.get("id")
+    except Exception:
+        external_event_id = None
 
     event = WebhookEvent(
-        received_at=datetime.utcnow(),
-        object=data.get("object") if isinstance(data, dict) else None,
-        status=status_tag,
-        raw_payload=data if isinstance(data, (dict, list)) else None,
-        raw_body=raw_body_text,
-        fingerprint=fingerprint,
+        source=source or "unknown",
+        event_type=event_type,
+        external_event_id=external_event_id,
+        payload=data if isinstance(data, (dict, list)) else None,
+        processed=(status_tag == "EVENT_RECEIVED"),
+        created_at=datetime.utcnow(),
     )
 
     try:
         db.add(event)
         db.commit()
-        return {"status_tag": status_tag, "fingerprint": fingerprint, "existing": False, "event_id": event.id}
+        db.refresh(event)
+        return {"status_tag": status_tag, "event_id": event.id, "existing": False}
     except Exception:
         db.rollback()
         raise
