@@ -1,87 +1,196 @@
-from datetime import datetime
-from decimal import Decimal
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import requests
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
-from models import Lead, Invoice, Contact
+from models import MetaConversionEvent
 
-PIXEL_ID = "your_pixel_id_here" or os.getenv("META_PIXEL_ID")
-ACCESS_TOKEN = "your_access_token_here" or os.getenv("META_ACCESS_TOKEN")
+GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v16.0")
+PIXEL_ID = os.getenv("META_PIXEL_ID")
+ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 
 
+def _resolve_meta_credentials(
+    pixel_id: Optional[str] = None,
+    access_token: Optional[str] = None,
+) -> tuple[str, str]:
+    resolved_pixel_id = pixel_id or PIXEL_ID
+    resolved_access_token = access_token or ACCESS_TOKEN
 
-def build_meta_payload_for_lead(lead_id: int, db: Session) -> Dict[str, Any]:
+    if not resolved_pixel_id:
+        raise ValueError("Missing META_PIXEL_ID")
+    if not resolved_access_token:
+        raise ValueError("Missing META_ACCESS_TOKEN")
+
+    return resolved_pixel_id, resolved_access_token
+
+
+def build_meta_payload_for_conversion_event(event: MetaConversionEvent) -> Dict[str, Any]:
     """
-    Build a Meta (Conversions API) payload for a Lead.
-    Returns a dict ready to be JSON-serialized and POSTed to Meta's /{pixel_id}/events endpoint.
+    Build a Meta Conversions API payload directly from a MetaConversionEvent row.
     """
-    lead = (
-        db.query(Lead)
-        .options(joinedload(Lead.contact), joinedload(Lead.invoices))
-        .filter(Lead.id == lead_id)
-        .first()
+    event_payload: Dict[str, Any] = {
+        "event_name": event.event_name,
+        "event_time": int(event.event_time),
+        "action_source": event.action_source or "business_messaging",
+        "messaging_channel": event.messaging_channel or "instagram",
+    }
+
+    if event.user_data:
+        event_payload["user_data"] = event.user_data
+    if event.custom_data:
+        event_payload["custom_data"] = event.custom_data
+
+    payload: Dict[str, Any] = {"data": [event_payload]}
+    if event.partner_agent:
+        payload["partner_agent"] = event.partner_agent
+    return payload
+
+
+def build_meta_payload_for_event_id(event_id: int, db: Session) -> Dict[str, Any]:
+    """
+    Load a MetaConversionEvent by id and build a request payload for Meta CAPI.
+    """
+    event = db.query(MetaConversionEvent).filter(MetaConversionEvent.id == event_id).first()
+    if not event:
+        raise ValueError(f"MetaConversionEvent {event_id} not found")
+
+    return build_meta_payload_for_conversion_event(event)
+
+
+def get_meta_conversion_events(
+    db: Session,
+    *,
+    event_ids: Optional[Sequence[int]] = None,
+    lead_id: Optional[int] = None,
+    event_name: Optional[str] = None,
+    limit: int = 50,
+) -> List[MetaConversionEvent]:
+    """
+    Query conversion events from DB to prepare posting to Meta.
+    """
+    query = db.query(MetaConversionEvent)
+
+    if event_ids:
+        query = query.filter(MetaConversionEvent.id.in_(list(event_ids)))
+    if lead_id is not None:
+        query = query.filter(MetaConversionEvent.lead_id == lead_id)
+    if event_name:
+        query = query.filter(MetaConversionEvent.event_name == event_name)
+
+    return (
+        query.order_by(MetaConversionEvent.created_at.asc(), MetaConversionEvent.id.asc())
+        .limit(limit)
+        .all()
     )
-    if not lead:
-        raise ValueError(f"Lead {lead_id} not found")
-
-    contact: Optional[Contact] = lead.contact
-
-    event_time = int(datetime.utcnow().timestamp())
-
-    user_data: Dict[str, Any] = {}
-    if contact:
-        if getattr(contact, "email", None):
-            user_data["em"] = contact.email
-        if getattr(contact, "phone", None):
-            user_data["ph"] = contact.phone if hasattr(contact, "phone") else None
-        # include internal UUID to help de-dup / matching (not hashed here; caller may hash)
-        if getattr(contact, "uuid", None):
-            user_data["client_user_id"] = str(contact.uuid)
-
-    # Aggregate invoice amounts if present
-    total_amount: Optional[float] = None
-    currency: Optional[str] = None
-    if lead.invoices:
-        sum_amount = Decimal("0")
-        for inv in lead.invoices:
-            if inv.amount is not None:
-                sum_amount += Decimal(inv.amount)
-            if not currency and getattr(inv, "currency", None):
-                currency = inv.currency
-        total_amount = float(sum_amount) if sum_amount != Decimal("0") else None
-
-    custom_data: Dict[str, Any] = {
-        "lead_id": lead.id,
-        "lead_status": lead.status,
-    }
-    if total_amount is not None:
-        custom_data["value"] = total_amount
-    if currency:
-        custom_data["currency"] = currency
-
-    event: Dict[str, Any] = {
-        "event_name": "Lead",
-        "event_time": event_time,
-        "event_id": f"lead_{lead.id}",
-        "action_source": "instagram",
-        "user_data": user_data or None,
-        "custom_data": custom_data,
-    }
-
-    return {"data": [event]}
 
 
-def post_payload_to_meta(pixel_id: str, access_token: str, payload: Dict[str, Any], timeout: int = 10) -> requests.Response:
+def post_payload_to_meta(
+    pixel_id: str,
+    access_token: str,
+    payload: Dict[str, Any],
+    timeout: int = 10,
+) -> requests.Response:
     """
-    Send the built payload to Meta's Conversions API.
-    Returns requests.Response for caller handling.
+    Send payload to Meta Conversions API.
     """
-    url = f"https://graph.facebook.com/v16.0/{pixel_id}/events"
+    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pixel_id}/events"
     params = {"access_token": access_token}
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(url, params=params, json=payload, headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    return resp
+    response = requests.post(url, params=params, json=payload, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+
+def post_meta_event_by_id(
+    db: Session,
+    *,
+    event_id: int,
+    pixel_id: Optional[str] = None,
+    access_token: Optional[str] = None,
+    timeout: int = 10,
+) -> Dict[str, Any]:
+    """
+    Post one MetaConversionEvent row to Meta CAPI by event id.
+    """
+    resolved_pixel_id, resolved_access_token = _resolve_meta_credentials(
+        pixel_id=pixel_id,
+        access_token=access_token,
+    )
+
+    payload = build_meta_payload_for_event_id(event_id, db)
+    response = post_payload_to_meta(
+        resolved_pixel_id,
+        resolved_access_token,
+        payload,
+        timeout=timeout,
+    )
+
+    response_body: Any
+    try:
+        response_body = response.json()
+    except ValueError:
+        response_body = response.text
+
+    return {
+        "event_id": event_id,
+        "status_code": response.status_code,
+        "response": response_body,
+    }
+
+
+def post_meta_events_batch(
+    db: Session,
+    *,
+    event_ids: Optional[Sequence[int]] = None,
+    lead_id: Optional[int] = None,
+    event_name: Optional[str] = None,
+    limit: int = 50,
+    pixel_id: Optional[str] = None,
+    access_token: Optional[str] = None,
+    timeout: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Post multiple conversion events loaded from DB rows.
+
+    Note:
+      - This function does not mutate event rows (no sent/failed marker columns exist yet).
+    """
+    resolved_pixel_id, resolved_access_token = _resolve_meta_credentials(
+        pixel_id=pixel_id,
+        access_token=access_token,
+    )
+
+    events = get_meta_conversion_events(
+        db,
+        event_ids=event_ids,
+        lead_id=lead_id,
+        event_name=event_name,
+        limit=limit,
+    )
+
+    results: List[Dict[str, Any]] = []
+    for event in events:
+        payload = build_meta_payload_for_conversion_event(event)
+        response = post_payload_to_meta(
+            resolved_pixel_id,
+            resolved_access_token,
+            payload,
+            timeout=timeout,
+        )
+        try:
+            response_body: Any = response.json()
+        except ValueError:
+            response_body = response.text
+
+        results.append(
+            {
+                "event_id": event.id,
+                "event_name": event.event_name,
+                "status_code": response.status_code,
+                "response": response_body,
+            }
+        )
+
+    return results
