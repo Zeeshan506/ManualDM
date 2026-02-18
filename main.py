@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from utils import (
     automation_mail,
@@ -12,16 +13,44 @@ from services.webhook_events import persist_webhook_event
 from services.event_handlers import handle_event_received
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import get_db, init_db
-from models import WebhookEvent
+from models import Lead, WebhookEvent
 
 
 app = FastAPI()
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
+
+
+class LeadContactUpdatePayload(BaseModel):
+    email: str | None = None
+    phone: str | None = None
+
+
+def _normalize_email(email: str | None) -> str | None:
+    if not email:
+        return None
+    normalized = email.strip().lower()
+    return normalized or None
+
+
+def _normalize_phone(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    compact = re.sub(r"[\s\-()]+", "", phone.strip())
+    if compact.startswith("+"):
+        digits = compact[1:]
+        if not digits.isdigit() or len(digits) < 8 or len(digits) > 15:
+            return None
+        return f"+{digits}"
+
+    if not compact.isdigit() or len(compact) < 8 or len(compact) > 15:
+        return None
+    return f"+{compact}"
 
 # Initialize database (creates tables in dev/sqlite; safe for Postgres if already migrated)
 init_db()
@@ -88,6 +117,59 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     if status_tag == "EVENT_RECEIVED":
         return {"status": "EVENT_RECEIVED"}
     return {"status": "IGNORED"}
+
+
+@app.post("/leads/{lead_id}/contact-details")
+async def update_lead_contact_details(
+    lead_id: int,
+    body: LeadContactUpdatePayload,
+    db: Session = Depends(get_db),
+):
+    if body.email is None and body.phone is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one of email or phone must be provided",
+        )
+
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    normalized_email = _normalize_email(body.email)
+    normalized_phone = _normalize_phone(body.phone)
+
+    if body.email is not None and not normalized_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email value",
+        )
+
+    if body.phone is not None and not normalized_phone:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid phone value; expected 8-15 digits with optional leading +",
+        )
+
+    try:
+        if body.email is not None:
+            lead.email = normalized_email
+        if body.phone is not None:
+            lead.phone = normalized_phone
+        db.commit()
+        db.refresh(lead)
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "status": "updated",
+        "lead_id": lead.id,
+        "email": lead.email,
+        "phone": lead.phone,
+    }
 
 
 if __name__ == "__main__":

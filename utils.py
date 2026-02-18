@@ -303,6 +303,9 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
         return {
             "lead_id": lead.id,
             "igsid": contact.igsid,
+            "created_lead": created_lead,
+            "created_contact": created_contact,
+            # keep legacy `created` key for backward compatibility
             "created": created_lead,
             "last_message_text": message_text,
         }

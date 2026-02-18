@@ -117,6 +117,7 @@ class Message(Base):
 # -----------------------------
 
 
+
 class Lead(Base):
     __tablename__ = "leads"
 
@@ -210,3 +211,38 @@ class PaymentEvent(Base):
     )
 
     invoice = relationship("Invoice", back_populates="payment_events")
+
+
+# -----------------------------
+# 7️⃣ Meta Conversion Events (Custom Events)
+# -----------------------------
+
+
+class MetaConversionEvent(Base):
+    __tablename__ = "meta_conversion_events"
+
+    id = Column(Integer, primary_key=True)
+
+    # optional relation to internal Lead
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    # Core event fields (mirror payload)
+    event_name = Column(String, nullable=False, index=True)           # e.g. "Purchase"
+    event_time = Column(Integer, nullable=False)                       # unix timestamp
+    action_source = Column(String, nullable=True)                      # e.g. "business_messaging"
+    messaging_channel = Column(String, nullable=True)                  # e.g. "instagram"
+
+    # Raw structured parts of the payload
+    user_data = Column(JSON, nullable=True)
+    custom_data = Column(JSON, nullable=True)
+
+    # Top-level partner agent field
+    partner_agent = Column(String, nullable=True)
+
+    # Store the full payload for audit/debug
+    full_payload = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    # relationships
+    lead = relationship("Lead", backref="meta_conversion_events")
