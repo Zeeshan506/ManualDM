@@ -138,8 +138,7 @@ def persist_viewcontent_event_for_lead(db: Session, *, lead_id: int, igsid: str)
     )
 
     db.add(record)
-    db.commit()
-    db.refresh(record)
+    db.flush()
     return record
 
 
@@ -205,6 +204,5 @@ def persist_ordercreated_event_for_lead(
     )
 
     db.add(record)
-    db.commit()
-    db.refresh(record)
+    db.flush()
     return record

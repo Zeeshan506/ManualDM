@@ -42,11 +42,6 @@ def persist_webhook_event(raw_body_text: str, data: Any, db: Session) -> dict:
         created_at=datetime.utcnow(),
     )
 
-    try:
-        db.add(event)
-        db.commit()
-        db.refresh(event)
-        return {"status_tag": status_tag, "event_id": event.id, "existing": False}
-    except Exception:
-        db.rollback()
-        raise
+    db.add(event)
+    db.flush()
+    return {"status_tag": status_tag, "event_id": event.id, "existing": False}

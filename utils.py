@@ -266,52 +266,45 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
     message_text = _extract_inbound_message_text(payload)
     now = datetime.utcnow()
 
-    try:
-        contact = db.query(Contact).filter(Contact.igsid == str(sender_id)).first()
-        if contact:
-            contact.last_message_at = now
-            created_contact = False
-        else:
-            contact = Contact(
-                igsid=str(sender_id),
-                referral_id=None,
-                platform="instagram",
-                created_at=now,
-                last_message_at=now,
-            )
-            db.add(contact)
-            db.flush()  # ensure id assigned for FK
-            created_contact = True
+    contact = db.query(Contact).filter(Contact.igsid == str(sender_id)).first()
+    if contact:
+        contact.last_message_at = now
+        created_contact = False
+    else:
+        contact = Contact(
+            igsid=str(sender_id),
+            referral_id=None,
+            platform="instagram",
+            created_at=now,
+            last_message_at=now,
+        )
+        db.add(contact)
+        db.flush()  # ensure id assigned for FK
+        created_contact = True
 
-        # Ensure a Lead exists for this contact (lead created when qualified)
-        if contact.lead:
-            lead = contact.lead
-            created_lead = False
-        else:
-            lead = Lead(
-                contact_id=contact.id,
-                status="new",
-                created_at=now,
-            )
-            db.add(lead)
-            created_lead = True
+    # Ensure a Lead exists for this contact (lead created when qualified)
+    if contact.lead:
+        lead = contact.lead
+        created_lead = False
+    else:
+        lead = Lead(
+            contact_id=contact.id,
+            status="new",
+            created_at=now,
+        )
+        db.add(lead)
+        created_lead = True
 
-        db.commit()
-        # refresh to get ids
-        db.refresh(contact)
-        db.refresh(lead)
-        return {
-            "lead_id": lead.id,
-            "igsid": contact.igsid,
-            "created_lead": created_lead,
-            "created_contact": created_contact,
-            # keep legacy `created` key for backward compatibility
-            "created": created_lead,
-            "last_message_text": message_text,
-        }
-    except Exception:
-        db.rollback()
-        raise
+    db.flush()
+    return {
+        "lead_id": lead.id,
+        "igsid": contact.igsid,
+        "created_lead": created_lead,
+        "created_contact": created_contact,
+        # keep legacy `created` key for backward compatibility
+        "created": created_lead,
+        "last_message_text": message_text,
+    }
 
 
 def append_chat_message(
@@ -335,34 +328,29 @@ def append_chat_message(
         payload: Optional raw payload data
     """
     now = datetime.utcnow()
-    try:
-        contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
-        if not contact:
-            contact = Contact(
-                igsid=str(igsid),
-                platform="instagram",
-                created_at=now,
-                last_message_at=now,
-            )
-            db.add(contact)
-            db.flush()
-
-        msg = Message(
-            contact_id=contact.id,
-            direction=direction,
-            text_raw=message_text,
-            platform_message_id=platform_message_id,
-            payload=payload,
+    contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
+    if not contact:
+        contact = Contact(
+            igsid=str(igsid),
+            platform="instagram",
             created_at=now,
+            last_message_at=now,
         )
-        db.add(msg)
-        contact.last_message_at = now
-        db.commit()
-        db.refresh(msg)
-        return msg
-    except Exception:
-        db.rollback()
-        raise
+        db.add(contact)
+        db.flush()
+
+    msg = Message(
+        contact_id=contact.id,
+        direction=direction,
+        text_raw=message_text,
+        platform_message_id=platform_message_id,
+        payload=payload,
+        created_at=now,
+    )
+    db.add(msg)
+    contact.last_message_at = now
+    db.flush()
+    return msg
 
 
 def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session) -> int:
@@ -383,37 +371,33 @@ def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session)
 
     created = 0
     now = datetime.utcnow()
-    try:
-        contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
-        if not contact:
-            contact = Contact(
-                igsid=str(igsid),
-                platform="instagram",
-                created_at=now,
-                last_message_at=now,
-            )
-            db.add(contact)
-            db.flush()
+    contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
+    if not contact:
+        contact = Contact(
+            igsid=str(igsid),
+            platform="instagram",
+            created_at=now,
+            last_message_at=now,
+        )
+        db.add(contact)
+        db.flush()
 
-        for msg in inbound:
-            if str(msg["igsid"]) != str(igsid):
-                continue
-            m = Message(
-                contact_id=contact.id,
-                direction="inbound",
-                text_raw=msg.get("message_text"),
-                platform_message_id=msg.get("platform_message_id"),
-                payload=msg.get("payload"),
-                created_at=now,
-            )
-            db.add(m)
-            created += 1
+    for msg in inbound:
+        if str(msg["igsid"]) != str(igsid):
+            continue
+        m = Message(
+            contact_id=contact.id,
+            direction="inbound",
+            text_raw=msg.get("message_text"),
+            platform_message_id=msg.get("platform_message_id"),
+            payload=msg.get("payload"),
+            created_at=now,
+        )
+        db.add(m)
+        created += 1
 
-        if created:
-            contact.last_message_at = now
+    if created:
+        contact.last_message_at = now
 
-        db.commit()
-        return created
-    except Exception:
-        db.rollback()
-        raise
+    db.flush()
+    return created

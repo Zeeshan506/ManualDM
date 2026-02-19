@@ -3,9 +3,10 @@ import re
 from datetime import datetime, timezone
 
 import requests
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from celery_app import celery_app
 from database import SessionLocal, get_db
 from models import InboundMessage, Lead
 
@@ -159,7 +160,6 @@ def decide_and_respond(lead_id: int, inbound_text: str):
 @router.post("/webhook/meta")
 async def meta_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     payload = await request.json()
@@ -194,5 +194,13 @@ async def meta_webhook(
         db.rollback()
         raise
 
-    background_tasks.add_task(decide_and_respond, lead.id, cleaned)
+    try:
+        result = celery_app.send_task(
+            "tasks.send_automation_reply",
+            kwargs={"igsid": str(instagram_user_id)},
+        )
+        print(f"Enqueued Celery task tasks.send_automation_reply id={result.id}")
+    except Exception as exc:
+        print(f"⚠️ Failed to enqueue automation reply task: {exc}")
+
     return {"status": "accepted", "lead_id": lead.id}

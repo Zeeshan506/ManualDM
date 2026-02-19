@@ -1,29 +1,29 @@
-import hashlib
 import json
 import os
 import re
 from datetime import datetime
-from utils import (
-    automation_mail,
-    upsert_lead_from_payload,
-    track_inbound_chat_history,
-    append_chat_message,
-)
 from services.webhook_events import persist_webhook_event
-from services.event_handlers import handle_event_received
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
+from celery_app import celery_app
 from database import get_db, init_db
-from models import Lead, WebhookEvent
+from models import Lead
 
 
 app = FastAPI()
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
+
+
+def _enqueue_webhook_processing(event_id: int) -> None:
+    result = celery_app.send_task(
+        "tasks.process_webhook_event",
+        kwargs={"event_id": int(event_id)},
+    )
+    print(f"Enqueued Celery task tasks.process_webhook_event id={result.id} event_id={event_id}")
 
 
 class LeadContactUpdatePayload(BaseModel):
@@ -106,11 +106,23 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         print(raw_body_text)
     print("==============================================\n")
 
-    persisted = persist_webhook_event(raw_body_text, data, db)
-    status_tag = persisted.get("status_tag")
+    persisted_event_id: int | None = None
+    try:
+        persisted = persist_webhook_event(raw_body_text, data, db)
+        status_tag = persisted.get("status_tag")
+        persisted_event_id = persisted.get("event_id")
 
-    if status_tag == "EVENT_RECEIVED" and isinstance(data, dict):
-        handler_summary = handle_event_received(data, db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    if status_tag == "EVENT_RECEIVED" and isinstance(data, dict) and persisted_event_id:
+        try:
+            _enqueue_webhook_processing(int(persisted_event_id))
+        except Exception as exc:
+            # Do not fail webhook response if queueing fails.
+            print(f"⚠️ Failed to enqueue process_webhook_event for event_id={persisted_event_id}: {exc}")
 
     if status_tag == "BAD_JSON":
         return {"status": "BAD_JSON"}
