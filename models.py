@@ -246,3 +246,5 @@ class MetaConversionEvent(Base):
 
     # relationships
     lead = relationship("Lead", backref="meta_conversion_events")
+
+

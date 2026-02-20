@@ -3,12 +3,15 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import requests
 from sqlalchemy.orm import Session
+from dotenv import load_dotenv
 
 from models import MetaConversionEvent
 
-GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v16.0")
-PIXEL_ID = os.getenv("META_PIXEL_ID")
-ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+load_dotenv()
+
+GRAPH_VERSION = os.getenv("META_GRAPH_VERSION") or os.getenv("IG_GRAPH_VERSION") or "v25.0"
+PIXEL_ID = os.getenv("DATASET_ID") or os.getenv("META_PIXEL_ID")
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 
 
 def _resolve_meta_credentials(
@@ -19,9 +22,9 @@ def _resolve_meta_credentials(
     resolved_access_token = access_token or ACCESS_TOKEN
 
     if not resolved_pixel_id:
-        raise ValueError("Missing META_PIXEL_ID")
+        raise ValueError("Missing DATASET_ID (or META_PIXEL_ID)")
     if not resolved_access_token:
-        raise ValueError("Missing META_ACCESS_TOKEN")
+        raise ValueError("Missing ACCESS_TOKEN (or META_ACCESS_TOKEN)")
 
     return resolved_pixel_id, resolved_access_token
 
@@ -95,7 +98,8 @@ def post_payload_to_meta(
     """
     Send payload to Meta Conversions API.
     """
-    url = f"https://graph.facebook.com/{GRAPH_VERSION}/{pixel_id}/events"
+    normalized_graph_version = GRAPH_VERSION if str(GRAPH_VERSION).startswith("v") else f"v{GRAPH_VERSION}"
+    url = f"https://graph.facebook.com/{normalized_graph_version}/{pixel_id}/events"
     params = {"access_token": access_token}
     headers = {"Content-Type": "application/json"}
     response = requests.post(url, params=params, json=payload, headers=headers, timeout=timeout)

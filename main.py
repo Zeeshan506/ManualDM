@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from celery_app import celery_app
 from database import get_db, init_db
 from models import Lead
+from services.meta_conversion_events import persist_custom_event_for_lead
 
 
 app = FastAPI()
@@ -29,6 +30,17 @@ def _enqueue_webhook_processing(event_id: int) -> None:
 class LeadContactUpdatePayload(BaseModel):
     email: str | None = None
     phone: str | None = None
+
+
+class LeadMetaEventPayload(BaseModel):
+    event_name: str
+    event_time: int | None = None
+    action_source: str = "business_messaging"
+    messaging_channel: str = "instagram"
+    user_data: dict | None = None
+    custom_data: dict | None = None
+    partner_agent: str | None = None
+    send_now: bool = True
 
 
 def _normalize_email(email: str | None) -> str | None:
@@ -181,6 +193,51 @@ async def update_lead_contact_details(
         "lead_id": lead.id,
         "email": lead.email,
         "phone": lead.phone,
+    }
+
+
+@app.post("/leads/{lead_id}/meta-events")
+async def create_lead_meta_event(
+    lead_id: int,
+    body: LeadMetaEventPayload,
+    db: Session = Depends(get_db),
+):
+    try:
+        event = persist_custom_event_for_lead(
+            db,
+            lead_id=lead_id,
+            event_name=body.event_name,
+            event_time=body.event_time,
+            action_source=body.action_source,
+            messaging_channel=body.messaging_channel,
+            user_data=body.user_data,
+            custom_data=body.custom_data,
+            partner_agent=body.partner_agent,
+        )
+        db.commit()
+        db.refresh(event)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    task_id = None
+    if body.send_now:
+        task = celery_app.send_task(
+            "tasks.post_meta_conversion_event",
+            kwargs={"event_id": int(event.id)},
+        )
+        task_id = task.id
+
+    return {
+        "status": "created",
+        "lead_id": lead_id,
+        "meta_event_id": event.id,
+        "event_name": event.event_name,
+        "queued_for_meta": bool(body.send_now),
+        "task_id": task_id,
     }
 
 

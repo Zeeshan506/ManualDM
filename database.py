@@ -1,6 +1,10 @@
 import os
+from pathlib import Path
 from typing import Generator
 
+from alembic import command
+from alembic.config import Config
+from alembic.util.exc import CommandError
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -39,10 +43,48 @@ def get_db() -> Generator:
         db.close()
 
 
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_postgres_url(url: str) -> bool:
+    return url.startswith("postgresql")
+
+
+def _alembic_config() -> Config:
+    project_root = Path(__file__).resolve().parent
+    config = Config(str(project_root / "alembic.ini"))
+    config.set_main_option("script_location", str(project_root / "migrations"))
+    config.set_main_option("sqlalchemy.url", DATABASE_URL)
+    return config
+
+
+def _run_postgres_migrations() -> None:
+    config = _alembic_config()
+
+    command.upgrade(config, "head")
+
+    try:
+        command.check(config)
+        return
+    except CommandError as exc:
+        if "New upgrade operations detected" not in str(exc):
+            raise
+
+    command.revision(config, message="auto schema sync", autogenerate=True)
+    command.upgrade(config, "head")
+
+
 def init_db() -> None:
-    """Create tables for dev/sqlite; safe no-op for existing Postgres schema."""
+    """Initialize schema using Alembic on Postgres; create_all fallback for sqlite."""
     import models  # noqa: F401 ensures models are registered with Base metadata
 
-    # Only run create_all for convenience; prod should rely on migrations.
+    if _is_postgres_url(DATABASE_URL):
+        auto_apply = _is_truthy(os.getenv("AUTO_APPLY_MIGRATIONS", "true"))
+        if auto_apply:
+            _run_postgres_migrations()
+        else:
+            command.upgrade(_alembic_config(), "head")
+        return
+
     Base.metadata.create_all(bind=engine)
-# *** End Patch
