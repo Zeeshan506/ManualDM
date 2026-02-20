@@ -1,4 +1,6 @@
 import os
+import copy
+import json
 from typing import Any, Dict, List, Optional, Sequence
 
 import requests
@@ -12,6 +14,33 @@ load_dotenv()
 GRAPH_VERSION = os.getenv("META_GRAPH_VERSION") or os.getenv("IG_GRAPH_VERSION") or "v25.0"
 PIXEL_ID = os.getenv("DATASET_ID") or os.getenv("META_PIXEL_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+
+
+def _normalize_business_messaging_event(event_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize event payloads for Meta business_messaging constraints.
+
+    Meta currently rejects event_name=Contact with action_source=business_messaging.
+    Map legacy Contact payloads to ViewContent at send time.
+    """
+    normalized = copy.deepcopy(event_payload)
+    if (
+        str(normalized.get("action_source") or "").lower() == "business_messaging"
+        and str(normalized.get("event_name") or "") == "Contact"
+    ):
+        normalized["event_name"] = "ViewContent"
+        custom_data = normalized.get("custom_data") if isinstance(normalized.get("custom_data"), dict) else {}
+        custom_data.setdefault("original_event_name", "Contact")
+        custom_data.setdefault("trigger", "referral")
+        normalized["custom_data"] = custom_data
+    return normalized
+
+
+def _extract_response_body(response: requests.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return response.text
 
 
 def _resolve_meta_credentials(
@@ -33,6 +62,16 @@ def build_meta_payload_for_conversion_event(event: MetaConversionEvent) -> Dict[
     """
     Build a Meta Conversions API payload directly from a MetaConversionEvent row.
     """
+    if isinstance(event.full_payload, dict):
+        data = event.full_payload.get("data")
+        if isinstance(data, list) and data:
+            payload: Dict[str, Any] = {
+                "data": [_normalize_business_messaging_event(item) for item in data if isinstance(item, dict)]
+            }
+            if event.partner_agent:
+                payload["partner_agent"] = event.partner_agent
+            return payload
+
     event_payload: Dict[str, Any] = {
         "event_name": event.event_name,
         "event_time": int(event.event_time),
@@ -40,12 +79,15 @@ def build_meta_payload_for_conversion_event(event: MetaConversionEvent) -> Dict[
         "messaging_channel": event.messaging_channel or "instagram",
     }
 
+    if event.event_id:
+        event_payload["event_id"] = event.event_id
+
     if event.user_data:
         event_payload["user_data"] = event.user_data
     if event.custom_data:
         event_payload["custom_data"] = event.custom_data
 
-    payload: Dict[str, Any] = {"data": [event_payload]}
+    payload: Dict[str, Any] = {"data": [_normalize_business_messaging_event(event_payload)]}
     if event.partner_agent:
         payload["partner_agent"] = event.partner_agent
     return payload
@@ -103,7 +145,15 @@ def post_payload_to_meta(
     params = {"access_token": access_token}
     headers = {"Content-Type": "application/json"}
     response = requests.post(url, params=params, json=payload, headers=headers, timeout=timeout)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        response_body = _extract_response_body(response)
+        raise RuntimeError(
+            "Meta CAPI request failed "
+            f"status={response.status_code} "
+            f"url={response.url} "
+            f"response={json.dumps(response_body, ensure_ascii=False)} "
+            f"payload={json.dumps(payload, ensure_ascii=False)}"
+        )
     return response
 
 
@@ -131,11 +181,7 @@ def post_meta_event_by_id(
         timeout=timeout,
     )
 
-    response_body: Any
-    try:
-        response_body = response.json()
-    except ValueError:
-        response_body = response.text
+    response_body: Any = _extract_response_body(response)
 
     return {
         "event_id": event_id,
@@ -183,10 +229,7 @@ def post_meta_events_batch(
             payload,
             timeout=timeout,
         )
-        try:
-            response_body: Any = response.json()
-        except ValueError:
-            response_body = response.text
+        response_body: Any = _extract_response_body(response)
 
         results.append(
             {

@@ -83,3 +83,22 @@ Notes:
 - `user_data` is automatically enriched from lead/contact data (hashed email/phone and ig sid when available).
 - Setting `send_now=false` stores the event only (no queue to Meta post task).
 
+## Active Meta Event Flow (Current)
+
+Implemented events are now limited to:
+- `Contact`: created when an incoming Instagram webhook contains a `referral` section.
+- `LeadSubmitted`: created when both email and phone are present for a lead (invoice is mocked for now).
+- `Purchase`: currently mocked via API endpoint (no Stripe webhook integration yet).
+
+Trigger mocked purchase event:
+
+```bash
+curl -X POST http://localhost:8000/leads/123/mock-purchase \
+	-H 'Content-Type: application/json' \
+	-d '{
+		"value": 123.00,
+		"currency": "USD",
+		"send_now": true
+	}'
+```
+

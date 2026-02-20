@@ -4,7 +4,7 @@ from utils import (
     upsert_lead_from_payload,
     track_inbound_chat_history,
 )
-from services.meta_conversion_events import persist_viewcontent_event_for_lead
+from services.meta_conversion_events import persist_contact_event_for_lead
 
 
 def has_referral(data: dict) -> bool:
@@ -50,23 +50,20 @@ def handle_event_received(data: dict, db: Session) -> dict:
         action = "created" if lead_result.get("created_lead") or lead_result.get("created_contact") else "updated"
         print(f"Lead {action}: id={lead_result.get('lead_id')} igsid={lead_result.get('igsid')}")
 
-        if lead_result.get("created_lead"):
-            meta_event = persist_viewcontent_event_for_lead(
+        if has_referral(data):
+            meta_event = persist_contact_event_for_lead(
                 db,
                 lead_id=int(lead_result["lead_id"]),
                 igsid=str(lead_result["igsid"]),
             )
-            if meta_event:
-                print(f"MetaConversionEvent created: id={meta_event.id} event_name={meta_event.event_name}")
-                result["async_jobs"].append(
-                    {
-                        "type": "post_meta_conversion_event",
-                        "event_id": int(meta_event.id),
-                    }
-                )
-                result["enqueue_reasons"].append("created_lead")
-            else:
-                print("MetaConversionEvent skipped (already exists): event_name=ViewContent")
+            print(f"MetaConversionEvent created: id={meta_event.id} event_name={meta_event.event_name}")
+            result["async_jobs"].append(
+                {
+                    "type": "post_meta_conversion_event",
+                    "event_id": int(meta_event.id),
+                }
+            )
+            result["enqueue_reasons"].append("referral_contact")
 
         saved = track_inbound_chat_history(
             data,

@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from celery_app import celery_app
 from database import get_db, init_db
 from models import Lead
-from services.meta_conversion_events import persist_custom_event_for_lead
+from services.meta_conversion_events import (
+    persist_custom_event_for_lead,
+    persist_leadsubmitted_event_for_lead,
+    persist_purchase_event_for_lead,
+)
 
 
 app = FastAPI()
@@ -40,6 +44,12 @@ class LeadMetaEventPayload(BaseModel):
     user_data: dict | None = None
     custom_data: dict | None = None
     partner_agent: str | None = None
+    send_now: bool = True
+
+
+class MockPurchasePayload(BaseModel):
+    value: float
+    currency: str = "USD"
     send_now: bool = True
 
 
@@ -182,8 +192,29 @@ async def update_lead_contact_details(
             lead.email = normalized_email
         if body.phone is not None:
             lead.phone = normalized_phone
+
+        queued_task_id = None
+        leadsubmitted_event_id = None
+        if lead.email and lead.phone:
+            leadsubmitted_event = persist_leadsubmitted_event_for_lead(
+                db,
+                lead_id=int(lead.id),
+                email=lead.email,
+                phone=lead.phone,
+                mock_invoice_id=f"mock-invoice-{lead.id}",
+            )
+            if leadsubmitted_event:
+                leadsubmitted_event_id = int(leadsubmitted_event.id)
+
         db.commit()
         db.refresh(lead)
+
+        if leadsubmitted_event_id is not None:
+            task = celery_app.send_task(
+                "tasks.post_meta_conversion_event",
+                kwargs={"event_id": int(leadsubmitted_event_id)},
+            )
+            queued_task_id = task.id
     except Exception:
         db.rollback()
         raise
@@ -193,6 +224,70 @@ async def update_lead_contact_details(
         "lead_id": lead.id,
         "email": lead.email,
         "phone": lead.phone,
+        "leadsubmitted_event_id": leadsubmitted_event_id,
+        "leadsubmitted_queued_task_id": queued_task_id,
+    }
+
+
+@app.post("/leads/{lead_id}/mock-purchase")
+async def create_mock_purchase_event(
+    lead_id: int,
+    body: MockPurchasePayload,
+    db: Session = Depends(get_db),
+):
+    if body.value <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="value must be greater than 0",
+        )
+
+    currency = (body.currency or "").strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="currency must be a 3-letter ISO code",
+        )
+
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    try:
+        event = persist_purchase_event_for_lead(
+            db,
+            lead_id=lead_id,
+            value=float(body.value),
+            currency=currency,
+            email=lead.email,
+            phone=lead.phone,
+        )
+        db.commit()
+        db.refresh(event)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    task_id = None
+    if body.send_now:
+        task = celery_app.send_task(
+            "tasks.post_meta_conversion_event",
+            kwargs={"event_id": int(event.id)},
+        )
+        task_id = task.id
+
+    return {
+        "status": "created",
+        "lead_id": lead_id,
+        "meta_event_id": int(event.id),
+        "event_name": event.event_name,
+        "queued_for_meta": bool(body.send_now),
+        "task_id": task_id,
     }
 
 

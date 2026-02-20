@@ -16,7 +16,7 @@ def _redis_url_with_db(redis_url: str, db_index: int) -> str:
 
 REDIS_CONNECTION_STRING = os.getenv("REDIS_CONNECTION_STRING")
 DEFAULT_REDIS_BASE = REDIS_CONNECTION_STRING or "redis://127.0.0.1:6379"
-
+# DEFAULT_REDIS_BASE = "redis://127.0.0.1:6379"
 BROKER_URL = os.getenv(
     "CELERY_BROKER_URL",
     _redis_url_with_db(DEFAULT_REDIS_BASE, 0),

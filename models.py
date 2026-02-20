@@ -229,6 +229,7 @@ class MetaConversionEvent(Base):
     # Core event fields (mirror payload)
     event_name = Column(String, nullable=False, index=True)           # e.g. "Purchase"
     event_time = Column(Integer, nullable=False)                       # unix timestamp
+    event_id = Column(String, nullable=True, index=True)               # uuid for deduplication
     action_source = Column(String, nullable=True)                      # e.g. "business_messaging"
     messaging_channel = Column(String, nullable=True)                  # e.g. "instagram"
 

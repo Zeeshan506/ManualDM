@@ -1,6 +1,7 @@
 import os
 import re
 import hashlib
+import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -9,7 +10,11 @@ from sqlalchemy.orm import Session
 from models import Lead, MetaConversionEvent
 
 
-IG_BUSINESS_ACCOUNT_ID = os.getenv("IG_ACCOUNT_ID") or os.getenv("IG_USER_ID")
+IG_BUSINESS_ACCOUNT_ID = (
+    os.getenv("IG_ACCOUNT_ID")
+    or os.getenv("INSTAGRAM_ACCOUNT_ID")
+    or os.getenv("IG_USER_ID")
+)
 
 
 def _sha256(value: str) -> str:
@@ -40,63 +45,89 @@ def _normalize_phone(phone: Optional[str]) -> Optional[str]:
     return digits
 
 
-def _build_viewcontent_payload(*, lead: Lead, igsid: str) -> Dict[str, Any]:
-    event_time = int(datetime.utcnow().timestamp())
+def _create_event_id() -> str:
+    return str(uuid.uuid4())
 
-    user_data: Dict[str, Any] = {"ig_sid": str(igsid)}
-    if IG_BUSINESS_ACCOUNT_ID:
-        user_data["instagram_business_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
 
-    event: Dict[str, Any] = {
-        "event_name": "ViewContent",
-        "event_time": event_time,
+def _build_base_event(*, event_name: str, event_time: Optional[int] = None) -> Dict[str, Any]:
+    resolved_event_time = int(event_time) if event_time is not None else int(datetime.utcnow().timestamp())
+    return {
+        "event_name": event_name,
+        "event_time": resolved_event_time,
+        "event_id": _create_event_id(),
         "action_source": "business_messaging",
         "messaging_channel": "instagram",
-        "user_data": user_data,
-        "custom_data": {
-            "lead_id": lead.id,
-            "lead_status": lead.status,
-        },
+    }
+
+
+def _build_contact_payload(*, lead: Lead, igsid: str, event_time: Optional[int] = None) -> Dict[str, Any]:
+    event: Dict[str, Any] = _build_base_event(event_name="ViewContent", event_time=event_time)
+
+    user_data: Dict[str, Any] = {
+        "ig_sid": str(igsid),
+    }
+    if IG_BUSINESS_ACCOUNT_ID:
+        user_data["ig_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
+
+    event["user_data"] = user_data
+
+    return {"data": [event]}
+
+
+def _build_leadsubmitted_payload(
+    *,
+    lead: Lead,
+    igsid: str,
+    hashed_email: str,
+    hashed_phone: str,
+    mock_invoice_id: Optional[str] = None,
+    event_time: Optional[int] = None,
+) -> Dict[str, Any]:
+    event: Dict[str, Any] = _build_base_event(event_name="LeadSubmitted", event_time=event_time)
+
+    user_data: Dict[str, Any] = {
+        "ig_sid": str(igsid),
+        "em": hashed_email,
+        "ph": hashed_phone,
+    }
+    if IG_BUSINESS_ACCOUNT_ID:
+        user_data["ig_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
+
+    event["user_data"] = user_data
+    event["custom_data"] = {
+        "mock_invoice_generated": True,
+        "mock_invoice_id": mock_invoice_id or f"mock-invoice-{lead.id}-{int(datetime.utcnow().timestamp())}",
     }
 
     return {"data": [event]}
 
 
-def _build_ordercreated_payload(
+def _build_purchase_payload(
     *,
     lead: Lead,
     igsid: str,
     hashed_email: Optional[str],
     hashed_phone: Optional[str],
-    value: Optional[float] = None,
-    currency: Optional[str] = None,
+    value: float,
+    currency: str,
+    event_time: Optional[int] = None,
 ) -> Dict[str, Any]:
-    event_time = int(datetime.utcnow().timestamp())
+    event: Dict[str, Any] = _build_base_event(event_name="Purchase", event_time=event_time)
 
-    user_data: Dict[str, Any] = {"ig_sid": str(igsid)}
+    user_data: Dict[str, Any] = {
+        "ig_sid": str(igsid),
+    }
     if IG_BUSINESS_ACCOUNT_ID:
-        user_data["instagram_business_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
+        user_data["ig_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
     if hashed_email:
         user_data["em"] = hashed_email
     if hashed_phone:
         user_data["ph"] = hashed_phone
 
-    custom_data: Dict[str, Any] = {
-        "lead_id": lead.id,
-        "lead_status": lead.status,
-    }
-    if value is not None:
-        custom_data["value"] = value
-    if currency:
-        custom_data["currency"] = currency.upper()
-
-    event: Dict[str, Any] = {
-        "event_name": "OrderCreated",
-        "event_time": event_time,
-        "action_source": "business_messaging",
-        "messaging_channel": "instagram",
-        "user_data": user_data,
-        "custom_data": custom_data,
+    event["user_data"] = user_data
+    event["custom_data"] = {
+        "value": float(value),
+        "currency": str(currency).upper(),
     }
 
     return {"data": [event]}
@@ -119,14 +150,14 @@ def _build_custom_payload(
     if lead_igsid:
         merged_user_data["ig_sid"] = str(lead_igsid)
     if IG_BUSINESS_ACCOUNT_ID:
-        merged_user_data["instagram_business_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
+        merged_user_data["ig_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
 
     normalized_email = _normalize_email(lead.email)
     normalized_phone = _normalize_phone(lead.phone)
     if normalized_email:
-        merged_user_data["em"] = [_sha256(normalized_email)]
+        merged_user_data["em"] = _sha256(normalized_email)
     if normalized_phone:
-        merged_user_data["ph"] = [_sha256(normalized_phone)]
+        merged_user_data["ph"] = _sha256(normalized_phone)
 
     if user_data:
         merged_user_data.update(user_data)
@@ -141,6 +172,7 @@ def _build_custom_payload(
     event: Dict[str, Any] = {
         "event_name": event_name,
         "event_time": resolved_event_time,
+        "event_id": _create_event_id(),
         "action_source": action_source,
         "messaging_channel": messaging_channel,
         "user_data": merged_user_data,
@@ -150,32 +182,25 @@ def _build_custom_payload(
     return {"data": [event]}
 
 
-def persist_viewcontent_event_for_lead(db: Session, *, lead_id: int, igsid: str) -> Optional[MetaConversionEvent]:
-    """
-    Persist a single ViewContent event for a newly-created lead.
-
-    Idempotency behavior:
-      - If a ViewContent event already exists for this lead, skip and return None.
-    """
+def persist_contact_event_for_lead(
+    db: Session,
+    *,
+    lead_id: int,
+    igsid: str,
+    event_time: Optional[int] = None,
+) -> MetaConversionEvent:
     lead = db.query(Lead).filter(Lead.id == lead_id).first()
     if not lead:
         raise ValueError(f"Lead {lead_id} not found")
 
-    existing = (
-        db.query(MetaConversionEvent)
-        .filter(MetaConversionEvent.lead_id == lead_id, MetaConversionEvent.event_name == "ViewContent")
-        .first()
-    )
-    if existing:
-        return None
-
-    payload = _build_viewcontent_payload(lead=lead, igsid=igsid)
+    payload = _build_contact_payload(lead=lead, igsid=igsid, event_time=event_time)
     event_data = payload["data"][0]
 
     record = MetaConversionEvent(
         lead_id=lead.id,
         event_name=event_data["event_name"],
         event_time=event_data["event_time"],
+        event_id=event_data.get("event_id"),
         action_source=event_data.get("action_source"),
         messaging_channel=event_data.get("messaging_channel"),
         user_data=event_data.get("user_data"),
@@ -190,28 +215,22 @@ def persist_viewcontent_event_for_lead(db: Session, *, lead_id: int, igsid: str)
     return record
 
 
-def persist_ordercreated_event_for_lead(
+def persist_leadsubmitted_event_for_lead(
     db: Session,
     *,
     lead_id: int,
     email: Optional[str] = None,
     phone: Optional[str] = None,
-    value: Optional[float] = None,
-    currency: Optional[str] = None,
+    mock_invoice_id: Optional[str] = None,
+    event_time: Optional[int] = None,
 ) -> Optional[MetaConversionEvent]:
-    """
-    Persist a single OrderCreated event for a lead after contact enrichment.
-
-    Idempotency behavior:
-      - If an OrderCreated event already exists for this lead, skip and return None.
-    """
     lead = db.query(Lead).filter(Lead.id == lead_id).first()
     if not lead:
         raise ValueError(f"Lead {lead_id} not found")
 
     existing = (
         db.query(MetaConversionEvent)
-        .filter(MetaConversionEvent.lead_id == lead_id, MetaConversionEvent.event_name == "OrderCreated")
+        .filter(MetaConversionEvent.lead_id == lead_id, MetaConversionEvent.event_name == "LeadSubmitted")
         .first()
     )
     if existing:
@@ -219,22 +238,24 @@ def persist_ordercreated_event_for_lead(
 
     normalized_email = _normalize_email(email if email is not None else lead.email)
     normalized_phone = _normalize_phone(phone if phone is not None else lead.phone)
+    if not normalized_email or not normalized_phone:
+        raise ValueError("LeadSubmitted requires both email and phone")
 
-    hashed_email = _sha256(normalized_email) if normalized_email else None
-    hashed_phone = _sha256(normalized_phone) if normalized_phone else None
+    hashed_email = _sha256(normalized_email)
+    hashed_phone = _sha256(normalized_phone)
 
     contact = lead.contact
     igsid = contact.igsid if contact and contact.igsid else None
     if not igsid:
         raise ValueError(f"Lead {lead_id} has no related contact IGSID")
 
-    payload = _build_ordercreated_payload(
+    payload = _build_leadsubmitted_payload(
         lead=lead,
         igsid=str(igsid),
         hashed_email=hashed_email,
         hashed_phone=hashed_phone,
-        value=value,
-        currency=currency,
+        mock_invoice_id=mock_invoice_id,
+        event_time=event_time,
     )
     event_data = payload["data"][0]
 
@@ -242,6 +263,61 @@ def persist_ordercreated_event_for_lead(
         lead_id=lead.id,
         event_name=event_data["event_name"],
         event_time=event_data["event_time"],
+        event_id=event_data.get("event_id"),
+        action_source=event_data.get("action_source"),
+        messaging_channel=event_data.get("messaging_channel"),
+        user_data=event_data.get("user_data"),
+        custom_data=event_data.get("custom_data"),
+        partner_agent=None,
+        full_payload=payload,
+        created_at=datetime.utcnow(),
+    )
+
+    db.add(record)
+    db.flush()
+    return record
+
+
+def persist_purchase_event_for_lead(
+    db: Session,
+    *,
+    lead_id: int,
+    value: float,
+    currency: str,
+    email: Optional[str] = None,
+    phone: Optional[str] = None,
+    event_time: Optional[int] = None,
+) -> MetaConversionEvent:
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise ValueError(f"Lead {lead_id} not found")
+
+    contact = lead.contact
+    igsid = contact.igsid if contact and contact.igsid else None
+    if not igsid:
+        raise ValueError(f"Lead {lead_id} has no related contact IGSID")
+
+    normalized_email = _normalize_email(email if email is not None else lead.email)
+    normalized_phone = _normalize_phone(phone if phone is not None else lead.phone)
+    hashed_email = _sha256(normalized_email) if normalized_email else None
+    hashed_phone = _sha256(normalized_phone) if normalized_phone else None
+
+    payload = _build_purchase_payload(
+        lead=lead,
+        igsid=str(igsid),
+        hashed_email=hashed_email,
+        hashed_phone=hashed_phone,
+        value=float(value),
+        currency=currency,
+        event_time=event_time,
+    )
+    event_data = payload["data"][0]
+
+    record = MetaConversionEvent(
+        lead_id=lead.id,
+        event_name=event_data["event_name"],
+        event_time=event_data["event_time"],
+        event_id=event_data.get("event_id"),
         action_source=event_data.get("action_source"),
         messaging_channel=event_data.get("messaging_channel"),
         user_data=event_data.get("user_data"),
@@ -291,6 +367,7 @@ def persist_custom_event_for_lead(
         lead_id=lead.id,
         event_name=event_data["event_name"],
         event_time=event_data["event_time"],
+        event_id=event_data.get("event_id"),
         action_source=event_data.get("action_source"),
         messaging_channel=event_data.get("messaging_channel"),
         user_data=event_data.get("user_data"),
