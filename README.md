@@ -7,6 +7,19 @@ Webhook endpoints now do minimal work in-request:
 
 Heavy database processing and outbound Meta calls run in Celery workers.
 
+## API Route Organization
+
+All API endpoints are now properly registered through the FastAPI router pattern:
+- Routes defined in `routes/api.py` using `APIRouter`
+- Router included in `main.py` via `app.include_router(api_router)`
+- All endpoints prefixed with `/api` and properly structured
+
+**Available Endpoints:**
+- `GET /api/leads` - Fetch all leads
+- `GET /api/leads/{lead_id}` - Get specific lead details
+- `GET /api/leads/{lead_id}/messages` - Fetch chat history for a lead
+- `GET /api/dashboard/stats` - Get dashboard metrics
+
 ## Database Schema Sync (Postgres)
 
 The API now auto-runs Alembic on startup when using Postgres:
