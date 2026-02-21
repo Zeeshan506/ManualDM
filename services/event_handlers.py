@@ -73,20 +73,25 @@ def handle_event_received(data: dict, db: Session) -> dict:
         result["saved_inbound_count"] = saved
         print(f"Inbound chat messages saved: {saved}")
 
-        # First-time greeting: send when either the contact or lead was created
-        created_first_time = bool(lead_result.get("created_contact") or lead_result.get("created_lead") or lead_result.get("created"))
-        if created_first_time:
-            sender_id = lead_result.get("igsid")
-            if sender_id:
-                result["async_jobs"].append(
-                    {
-                        "type": "send_automation_reply",
-                        "igsid": str(sender_id),
-                    }
-                )
-                result["enqueue_reasons"].append("first_time_contact")
-        else:
-            print("No automation enqueue: sender already exists (not first-time)")
+        # First-time greeting automation is intentionally disabled for now.
+        # Keep this block for future re-enable.
+        # created_first_time = bool(
+        #     lead_result.get("created_contact")
+        #     or lead_result.get("created_lead")
+        #     or lead_result.get("created")
+        # )
+        # if created_first_time:
+        #     sender_id = lead_result.get("igsid")
+        #     if sender_id:
+        #         result["async_jobs"].append(
+        #             {
+        #                 "type": "send_automation_reply",
+        #                 "igsid": str(sender_id),
+        #             }
+        #         )
+        #         result["enqueue_reasons"].append("first_time_contact")
+        # else:
+        #     print("No automation enqueue: sender already exists (not first-time)")
     else:
         # No sender could be determined; try to record history if possible.
         print("No sender id found in payload - nothing to upsert or reply to")
