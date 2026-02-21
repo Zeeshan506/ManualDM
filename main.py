@@ -15,9 +15,13 @@ from services.meta_conversion_events import (
     persist_leadsubmitted_event_for_lead,
     persist_purchase_event_for_lead,
 )
+from routes.api import router as api_router
 
 
 app = FastAPI()
+
+# Include API routes
+app.include_router(api_router)
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
