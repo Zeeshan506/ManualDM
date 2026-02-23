@@ -146,9 +146,9 @@ def post_meta_conversion_event(self, *, event_id: int) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         result = post_meta_event_by_id(db, event_id=event_id)
-		task_status = result.get("status") if isinstance(result, dict) else None
+        task_status = result.get("status") if isinstance(result, dict) else None
         return {
-			"status": task_status or "posted",
+            "status": task_status or "posted",
             "task": "post_meta_conversion_event",
             "event_id": int(event_id),
             "result": result,
