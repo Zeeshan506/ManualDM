@@ -8,7 +8,7 @@ router = APIRouter(prefix="/api", tags=["API Endpoints"])
 
 @router.get("/leads")
 def get_all_leads(
-    status: str | None = Query(None, description="Filter leads by status (e.g., new, contacted, invoiced, paid)"),
+    status: str | None = Query(None, description="Filter leads by status (e.g., new, invoiced, paid, cancelled)"),
     db: Session = Depends(get_db)
 ):
     """

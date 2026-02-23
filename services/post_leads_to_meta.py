@@ -16,6 +16,20 @@ PIXEL_ID = os.getenv("DATASET_ID") or os.getenv("META_PIXEL_ID")
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 
 
+def _is_viewcontent_payload(payload: Dict[str, Any]) -> bool:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return False
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("event_name") or "") == "ViewContent":
+            return True
+
+    return False
+
+
 def _normalize_business_messaging_event(event_payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize event payloads for Meta business_messaging constraints.
@@ -168,12 +182,30 @@ def post_meta_event_by_id(
     """
     Post one MetaConversionEvent row to Meta CAPI by event id.
     """
+    event = db.query(MetaConversionEvent).filter(MetaConversionEvent.id == event_id).first()
+    if not event:
+        raise ValueError(f"MetaConversionEvent {event_id} not found")
+
+    if str(event.event_name or "") == "ViewContent":
+        return {
+            "event_id": event_id,
+            "status": "skipped",
+            "reason": "viewcontent_not_sent",
+        }
+
     resolved_pixel_id, resolved_access_token = _resolve_meta_credentials(
         pixel_id=pixel_id,
         access_token=access_token,
     )
 
-    payload = build_meta_payload_for_event_id(event_id, db)
+    payload = build_meta_payload_for_conversion_event(event)
+    if _is_viewcontent_payload(payload):
+        return {
+            "event_id": event_id,
+            "status": "skipped",
+            "reason": "viewcontent_not_sent",
+        }
+
     response = post_payload_to_meta(
         resolved_pixel_id,
         resolved_access_token,
@@ -223,6 +255,17 @@ def post_meta_events_batch(
     results: List[Dict[str, Any]] = []
     for event in events:
         payload = build_meta_payload_for_conversion_event(event)
+        if str(event.event_name or "") == "ViewContent" or _is_viewcontent_payload(payload):
+            results.append(
+                {
+                    "event_id": event.id,
+                    "event_name": event.event_name,
+                    "status": "skipped",
+                    "reason": "viewcontent_not_sent",
+                }
+            )
+            continue
+
         response = post_payload_to_meta(
             resolved_pixel_id,
             resolved_access_token,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from logging.config import fileConfig
+# from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -11,8 +11,8 @@ import models  # noqa: F401  Registers model metadata
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+# if config.config_file_name is not None:
+#     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
 

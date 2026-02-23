@@ -5,6 +5,7 @@ from datetime import datetime
 from services.webhook_events import persist_webhook_event
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from celery_app import celery_app
@@ -20,6 +21,15 @@ from routes.api import router as api_router
 
 app = FastAPI()
 
+# --- Add the CORS Configuration Here ---
+app.add_middleware(
+    CORSMiddleware,
+    # In production, replace the wildcard or localhost with your actual Vercel/frontend domain.
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], 
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
 # Include API routes
 app.include_router(api_router)
 
