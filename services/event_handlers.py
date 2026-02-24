@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 
+from models import Lead
 from utils import (
     upsert_lead_from_payload,
     track_inbound_chat_history,
@@ -49,6 +50,13 @@ def handle_event_received(data: dict, db: Session) -> dict:
     if lead_result:
         action = "created" if lead_result.get("created_lead") or lead_result.get("created_contact") else "updated"
         print(f"Lead {action}: id={lead_result.get('lead_id')} igsid={lead_result.get('igsid')}")
+
+        if lead_result.get("created_lead") and lead_result.get("lead_id"):
+            created_lead = db.query(Lead).filter(Lead.id == int(lead_result["lead_id"])).first()
+            if created_lead:
+                created_lead.assigned_to = None
+                created_lead.lead_status = "unassigned"
+                db.flush()
 
         if has_referral(data):
             meta_event = persist_contact_event_for_lead(

@@ -3,13 +3,15 @@ from sqlalchemy.orm import joinedload, Session
 from database import get_db
 from sqlalchemy import func
 from datetime import datetime, timezone
-from models import Lead, Message, Contact, Invoice, MetaConversionEvent
+from dependencies import get_current_user
+from models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
 
 @router.get("/leads")
 def get_all_leads(
     status: str | None = Query(None, description="Filter leads by status (e.g., new, invoiced, paid, cancelled)"),
+    assigned_to: int | None = Query(None, description="Filter active chats assigned to a specific user id"),
     db: Session = Depends(get_db)
 ):
     """
@@ -19,9 +21,19 @@ def get_all_leads(
     # Start building the query, joining Lead with Contact to avoid N+1 query issues
     query = db.query(Lead).options(joinedload(Lead.contact))
 
+    # Sales rep views
+    if assigned_to is not None:
+        query = query.filter(
+            Lead.assigned_to == assigned_to,
+            Lead.lead_status == "active",
+        )
+
     # Apply optional status filter
     if status and status.lower() != "all":
-        query = query.filter(Lead.status == status.lower())
+        if status.lower() == "unassigned":
+            query = query.filter(Lead.assigned_to.is_(None))
+        else:
+            query = query.filter(Lead.status == status.lower())
 
     leads = query.all()
 
@@ -53,6 +65,37 @@ def get_all_leads(
     )
 
     return response_data
+
+
+@router.put("/leads/{lead_id}/assign")
+def assign_lead_to_current_user(
+    lead_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Assign a lead to the current authenticated user.
+    Moves lead_status from 'unassigned' to 'active'.
+    """
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    lead.assigned_to = current_user.id
+    if lead.lead_status == "unassigned":
+        lead.lead_status = "active"
+
+    db.commit()
+    db.refresh(lead)
+
+    return {
+        "id": lead.id,
+        "assigned_to": lead.assigned_to,
+        "lead_status": lead.lead_status,
+    }
 
 
 @router.get("/leads/{lead_id}")
