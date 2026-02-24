@@ -18,6 +18,7 @@ from services.meta_conversion_events import (
 )
 from routes.api import router as api_router
 from routes.auth import router as auth_router
+from routes.users import router as users_router
 
 
 app = FastAPI()
@@ -34,6 +35,7 @@ app.add_middleware(
 # Include API routes
 app.include_router(api_router)
 app.include_router(auth_router)
+app.include_router(users_router)
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
