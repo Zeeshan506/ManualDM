@@ -21,7 +21,14 @@ class PasswordResetRequestBody(BaseModel):
 
 @router.post("/login")
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == body.username).first()
+    normalized_username = body.username.strip()
+    if not normalized_username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username is required",
+        )
+
+    user = db.query(User).filter(User.username == normalized_username).first()
 
     if not user or not verify_password(body.password, user.hashed_password):
         raise HTTPException(
@@ -41,6 +48,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         "access_token": token,
         "token_type": "bearer",
         "user_id": user.id,
+        "username": user.username,
         "role": user.role,
     }
 
