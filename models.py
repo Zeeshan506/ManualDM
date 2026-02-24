@@ -5,6 +5,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Enum,
     ForeignKey,
     Integer,
     String,
@@ -113,7 +114,28 @@ class Message(Base):
 
 
 # -----------------------------
-# 4️⃣ Lead (Created When Qualified)
+# 4️⃣ Users (Authentication + Authorization)
+# -----------------------------
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True)
+    username = Column(String, nullable=False, unique=True, index=True)
+    hashed_password = Column(String, nullable=False)
+    role = Column(
+        Enum("admin", "sales_rep", name="user_role"),
+        nullable=False,
+        default="sales_rep",
+    )
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    assigned_leads = relationship("Lead", back_populates="assignee")
+
+
+# -----------------------------
+# 5️⃣ Lead (Created When Qualified)
 # -----------------------------
 
 
@@ -132,6 +154,14 @@ class Lead(Base):
 
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
+    name = Column(String, nullable=True)
+    assigned_to = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    lead_status = Column(String, nullable=False, default="unassigned")
 
     status = Column(String, nullable=False, default="new")
     # new | invoiced | paid | cancelled
@@ -142,13 +172,14 @@ class Lead(Base):
     converted_at = Column(DateTime(timezone=True), nullable=True)
 
     contact = relationship("Contact", back_populates="lead")
+    assignee = relationship("User", back_populates="assigned_leads")
     invoices = relationship(
         "Invoice", back_populates="lead", cascade="all, delete-orphan"
     )
 
 
 # -----------------------------
-# 5️⃣ Invoice (Stripe Mapping)
+# 6️⃣ Invoice (Stripe Mapping)
 # -----------------------------
 
 
@@ -182,7 +213,7 @@ class Invoice(Base):
 
 
 # -----------------------------
-# 6️⃣ Payment Events (Stripe Webhook + CAPI Control)
+# 7️⃣ Payment Events (Stripe Webhook + CAPI Control)
 # -----------------------------
 
 
@@ -214,7 +245,7 @@ class PaymentEvent(Base):
 
 
 # -----------------------------
-# 7️⃣ Meta Conversion Events (Custom Events)
+# 8️⃣ Meta Conversion Events (Custom Events)
 # -----------------------------
 
 

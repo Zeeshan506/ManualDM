@@ -19,6 +19,7 @@ All API endpoints are now properly registered through the FastAPI router pattern
 - `GET /api/leads/{lead_id}` - Get specific lead details
 - `GET /api/leads/{lead_id}/messages` - Fetch chat history for a lead
 - `GET /api/dashboard/stats` - Get dashboard metrics
+- `GET /api/dashboard/activity` - Get recent dashboard activity feed
 
 ## Database Schema Sync (Postgres)
 
@@ -48,30 +49,54 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 celery -A celery_app.celery_app worker --loglevel=info
 ```
 
-## Optional Env Overrides
+## Environment Variables
 
-- `REDIS_CONNECTION_STRING` (default base for Celery Redis URLs)
+### Required
+- `VERIFY_TOKEN` - Token to verify webhooks from Meta/Instagram
+- `DATABASE_URL` - PostgreSQL connection string for development
+- `REDIS_CONNECTION_STRING` - Redis connection for Celery task queue
+- `ACCESS_TOKEN` - Meta access token for Conversions API
+- `DATASET_ID` - Meta Dataset/Pixel ID
+- `INSTAGRAM_ACCOUNT_ID` - Instagram Business Account ID
+
+### Instagram Graph API
+- `IG_GRAPH_VERSION` (default: `24.0`) - Instagram Graph API version
+- `IG_MESSAGING_PRODUCT` (default: `instagram`) - Messaging product identifier
+- `IG_AUTOREPLY_TEXT` - Auto-reply message sent on first contact
+
+### Database & Migrations
+- `DATABASE_URL_RENDER` - Postgres with transaction pooling for production (recommended for Render/Supabase)
+- `AUTO_APPLY_MIGRATIONS` (default: `false`) - Auto-run Alembic migrations on startup (Postgres only)
+
+### Celery Task Configuration
+- `REDIS_CONNECTION_STRING` - Base Redis URL for Celery broker/results
 - `CELERY_BROKER_URL` (default: `REDIS_CONNECTION_STRING` with db `0`, fallback `redis://127.0.0.1:6379/0`)
 - `CELERY_RESULT_BACKEND` (default: `REDIS_CONNECTION_STRING` with db `1`, fallback `redis://127.0.0.1:6379/1`)
-- `AUTO_APPLY_MIGRATIONS` (default: `true`; Postgres only)
-- `REPEAT_COUNT` (global retry count for all Celery tasks)
-- `TASK_REPEAT_COUNT` (global retry count fallback)
-- `<TASK_NAME>_REPEAT_COUNT` (per-task override; example: `SEND_AUTOMATION_REPLY_REPEAT_COUNT=5`)
+- `TASK_REPEAT_COUNT` (default: `3`) - Global retry count for all Celery tasks
+- `REPEAT_COUNT` - Global retry count fallback (if `TASK_REPEAT_COUNT` not set)
+- `<TASK_NAME>_REPEAT_COUNT` - Per-task override (example: `SEND_AUTOMATION_REPLY_REPEAT_COUNT=5`)
 
-## Meta Conversions API Credentials
+## Meta Conversions API Configuration
 
-For posting conversion events to Meta, the service reads:
-- `DATASET_ID` (used as Pixel/Dataset id in `/{dataset_id}/events`)
-- `ACCESS_TOKEN` (Meta token passed as `access_token`)
+For posting conversion events to Meta, configure these variables:
+- `DATASET_ID` - Used as Pixel/Dataset id in `/{dataset_id}/events` endpoint
+- `ACCESS_TOKEN` - Meta token passed as `access_token` parameter
 
-Backward-compatible fallbacks are still supported:
-- `META_PIXEL_ID`
-- `META_ACCESS_TOKEN`
+**Backward-compatible fallbacks:**
+- `META_PIXEL_ID` - Fallback for `DATASET_ID`
+- `META_ACCESS_TOKEN` - Fallback for `ACCESS_TOKEN`
 
-Graph API version resolution order:
-- `META_GRAPH_VERSION`
-- `IG_GRAPH_VERSION`
-- default `v25.0`
+**Graph API version resolution order:**
+1. `META_GRAPH_VERSION`
+2. `IG_GRAPH_VERSION`
+3. Default `v25.0`
+
+### Event Send Behavior
+
+**ViewContent** (first-contact referral event):
+- ✅ Recorded in `meta_conversion_events` database table
+- ❌ NOT sent to Meta Conversions API (intentionally skipped)
+- Useful for tracking but Meta doesn't process this event type for business_messaging
 
 ## Create Custom Meta Event From Database Lead
 
@@ -98,12 +123,22 @@ Notes:
 
 ## Active Meta Event Flow (Current)
 
-Implemented events are now limited to:
-- `Contact`: created when an incoming Instagram webhook contains a `referral` section.
-- `LeadSubmitted`: created when both email and phone are present for a lead (invoice is mocked for now).
-- `Purchase`: currently mocked via API endpoint (no Stripe webhook integration yet).
+Implemented events:
 
-Trigger mocked purchase event:
+- **ViewContent** (Contact event)
+  - Triggered when an incoming Instagram webhook contains a `referral` section
+  - Recorded in database but **not sent to Meta** (intentional)
+  - Useful for internal tracking and attribution
+
+- **LeadSubmitted**
+  - Triggered when both email and phone are present for a lead
+  - Sent to Meta Conversions API
+  - Mock invoice generated for testing
+
+- **Purchase**
+  - Triggered via API endpoint for testing
+  - Sent to Meta Conversions API
+  - Stripe webhook integration planned for production
 
 ```bash
 curl -X POST http://localhost:8000/leads/123/mock-purchase \

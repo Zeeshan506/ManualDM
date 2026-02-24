@@ -17,6 +17,7 @@ from services.meta_conversion_events import (
     persist_purchase_event_for_lead,
 )
 from routes.api import router as api_router
+from routes.auth import router as auth_router
 
 
 app = FastAPI()
@@ -32,6 +33,7 @@ app.add_middleware(
 )
 # Include API routes
 app.include_router(api_router)
+app.include_router(auth_router)
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
@@ -46,6 +48,7 @@ def _enqueue_webhook_processing(event_id: int) -> None:
 
 
 class LeadContactUpdatePayload(BaseModel):
+    name: str | None = None
     email: str | None = None
     phone: str | None = None
 
@@ -87,6 +90,13 @@ def _normalize_phone(phone: str | None) -> str | None:
     if not compact.isdigit() or len(compact) < 8 or len(compact) > 15:
         return None
     return f"+{compact}"
+
+
+def _normalize_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    normalized = " ".join(name.strip().split())
+    return normalized or None
 
 # Initialize database (creates tables in dev/sqlite; safe for Postgres if already migrated)
 init_db()
@@ -173,10 +183,10 @@ async def update_lead_contact_details(
     body: LeadContactUpdatePayload,
     db: Session = Depends(get_db),
 ):
-    if body.email is None and body.phone is None:
+    if body.name is None and body.email is None and body.phone is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one of email or phone must be provided",
+            detail="At least one of name, email, or phone must be provided",
         )
 
     lead = db.query(Lead).filter(Lead.id == lead_id).first()
@@ -188,6 +198,13 @@ async def update_lead_contact_details(
 
     normalized_email = _normalize_email(body.email)
     normalized_phone = _normalize_phone(body.phone)
+    normalized_name = _normalize_name(body.name)
+
+    if body.name is not None and len((normalized_name or "")) > 120:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid name value; max length is 120 characters",
+        )
 
     if body.email is not None and not normalized_email:
         raise HTTPException(
@@ -202,6 +219,8 @@ async def update_lead_contact_details(
         )
 
     try:
+        if body.name is not None:
+            lead.name = normalized_name
         if body.email is not None:
             lead.email = normalized_email
         if body.phone is not None:
@@ -209,7 +228,8 @@ async def update_lead_contact_details(
 
         queued_task_id = None
         leadsubmitted_event_id = None
-        if lead.email and lead.phone:
+        contact_fields_updated = body.email is not None or body.phone is not None
+        if contact_fields_updated and lead.email and lead.phone:
             leadsubmitted_event = persist_leadsubmitted_event_for_lead(
                 db,
                 lead_id=int(lead.id),
@@ -236,6 +256,7 @@ async def update_lead_contact_details(
     return {
         "status": "updated",
         "lead_id": lead.id,
+        "name": lead.name,
         "email": lead.email,
         "phone": lead.phone,
         "leadsubmitted_event_id": leadsubmitted_event_id,

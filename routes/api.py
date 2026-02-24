@@ -2,6 +2,7 @@ from fastapi import Depends, HTTPException, Query, status, APIRouter
 from sqlalchemy.orm import joinedload, Session
 from database import get_db
 from sqlalchemy import func
+from datetime import datetime, timezone
 from models import Lead, Message, Contact, Invoice, MetaConversionEvent
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
@@ -38,9 +39,7 @@ def get_all_leads(
         response_data.append({
             "id": lead.id,
             "igsid": contact.igsid if contact else None,
-            # Note: Your schema doesn't currently store the user's real name. 
-            # You can extract this from the IG webhook user profile payload later if needed.
-            "name": "", 
+            "name": lead.name or "",
             "status": lead.status,
             "email": lead.email or "",
             "phone": lead.phone or "",
@@ -81,7 +80,7 @@ def get_lead_details(lead_id: int, db: Session = Depends(get_db)):
     return {
         "id": lead.id,
         "igsid": contact.igsid if contact else None,
-        "name": "",  # Placeholder until IG profile scraping is added
+        "name": lead.name or "",
         "status": lead.status,
         "email": lead.email or "",
         "phone": lead.phone or "",
@@ -166,3 +165,89 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         "conversionRate": conversion_rate,
         "totalRevenue": float(total_revenue)
     }
+
+
+@router.get("/dashboard/activity")
+def get_dashboard_activity(
+    limit: int = Query(10, ge=1, le=50, description="Maximum activity items to return"),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns a unified recent activity feed for dashboard UI.
+    Sources: latest messages, lead submissions, paid invoices, and CAPI events.
+    """
+    activity_items: list[dict] = []
+
+    recent_messages = (
+        db.query(Message)
+        .options(joinedload(Message.contact))
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    for msg in recent_messages:
+        contact_igsid = msg.contact.igsid if msg.contact else "unknown"
+        preview = (msg.text_cleaned or msg.text_raw or "New message")[:90]
+        activity_items.append(
+            {
+                "type": "message",
+                "text": f"{msg.direction.capitalize()} message with {contact_igsid}: {preview}",
+                "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+            }
+        )
+
+    recent_leads = db.query(Lead).order_by(Lead.created_at.desc()).limit(limit).all()
+    for lead in recent_leads:
+        activity_items.append(
+            {
+                "type": "lead",
+                "text": f"Lead #{lead.id} captured",
+                "timestamp": lead.created_at.isoformat() if lead.created_at else None,
+            }
+        )
+
+    recent_paid_invoices = (
+        db.query(Invoice)
+        .filter(Invoice.status == "paid")
+        .order_by(Invoice.paid_at.desc().nullslast(), Invoice.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    for invoice in recent_paid_invoices:
+        paid_time = invoice.paid_at or invoice.created_at
+        amount_display = f"{float(invoice.amount):,.2f}"
+        activity_items.append(
+            {
+                "type": "conversion",
+                "text": f"Invoice {invoice.stripe_invoice_id} paid (${amount_display})",
+                "timestamp": paid_time.isoformat() if paid_time else None,
+            }
+        )
+
+    recent_capi_events = (
+        db.query(MetaConversionEvent)
+        .filter(MetaConversionEvent.event_name == "LeadSubmitted")
+        .order_by(MetaConversionEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    for event in recent_capi_events:
+        activity_items.append(
+            {
+                "type": "qualified",
+                "text": f"LeadSubmitted synced for lead #{event.lead_id}" if event.lead_id else "LeadSubmitted synced",
+                "timestamp": event.created_at.isoformat() if event.created_at else None,
+            }
+        )
+
+    def _timestamp_sort_key(item: dict) -> datetime:
+        ts = item.get("timestamp")
+        if not ts:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    activity_items.sort(key=_timestamp_sort_key, reverse=True)
+    return activity_items[:limit]
