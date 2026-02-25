@@ -124,8 +124,9 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     username = Column(String, nullable=False, unique=True, index=True)
     hashed_password = Column(String, nullable=False)
+    name = Column(String, nullable=True)
     role = Column(
-        Enum("admin", "sales_rep", name="user_role"),
+        Enum("sudo_admin", "admin", "sales_rep", name="user_role"),
         nullable=False,
         default="sales_rep",
     )

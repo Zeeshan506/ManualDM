@@ -18,6 +18,7 @@ from services.meta_conversion_events import (
 )
 from routes.api import router as api_router
 from routes.auth import router as auth_router
+from routes.admin import router as admin_router
 from routes.users import router as users_router
 
 
@@ -36,6 +37,7 @@ app.add_middleware(
 app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(admin_router)
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
