@@ -10,8 +10,9 @@ router = APIRouter(prefix="/api", tags=["API Endpoints"])
 
 @router.get("/leads")
 def get_all_leads(
-    status: str | None = Query(None, description="Filter leads by status (e.g., new, invoiced, paid, cancelled)"),
+    status_filter: str | None = Query(None, alias="status", description="Filter leads by status (e.g., new, invoiced, paid, cancelled)"),
     assigned_to: int | None = Query(None, description="Filter active chats assigned to a specific user id"),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -21,19 +22,29 @@ def get_all_leads(
     # Start building the query, joining Lead with Contact to avoid N+1 query issues
     query = db.query(Lead).options(joinedload(Lead.contact))
 
-    # Sales rep views
-    if assigned_to is not None:
-        query = query.filter(
-            Lead.assigned_to == assigned_to,
-            Lead.lead_status == "active",
-        )
+    normalized_status = status_filter.lower() if status_filter else None
+    is_unassigned_filter = normalized_status == "unassigned"
 
-    # Apply optional status filter
-    if status and status.lower() != "all":
-        if status.lower() == "unassigned":
+    if current_user.role == "sales_rep":
+        if is_unassigned_filter:
             query = query.filter(Lead.assigned_to.is_(None))
         else:
-            query = query.filter(Lead.status == status.lower())
+            target_assignee = current_user.id if assigned_to is None else assigned_to
+            if target_assignee != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Sales reps can only view their own assigned chats",
+                )
+            query = query.filter(Lead.assigned_to == current_user.id)
+    elif assigned_to is not None:
+        query = query.filter(Lead.assigned_to == assigned_to)
+
+    # Apply optional status filter
+    if normalized_status and normalized_status != "all":
+        if normalized_status == "unassigned":
+            query = query.filter(Lead.assigned_to.is_(None))
+        else:
+            query = query.filter(Lead.status == normalized_status)
 
     leads = query.all()
 
