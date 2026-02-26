@@ -14,8 +14,8 @@ from security import decode_access_token
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 load_dotenv()
-LEAD_PRESISTANCE_ID = (
-    os.getenv("LEAD_PRESISTANCE_ID")
+SUDO_ADMIN_BACKUP = (
+    os.getenv("SUDO_ADMIN_BACKUP")
 )
 SUDO_USER_ID = os.getenv("SUDO_USER_ID")
 
@@ -39,10 +39,10 @@ def get_current_user(
     if not username:
         raise credentials_exception
 
-    if username == LEAD_PRESISTANCE_ID and role == "sudo_admin":
+    if username == SUDO_ADMIN_BACKUP and role == "sudo_admin":
         local_sudo_admin = User()
         local_sudo_admin.id = 0
-        local_sudo_admin.username = LEAD_PRESISTANCE_ID
+        local_sudo_admin.username = SUDO_ADMIN_BACKUP
         local_sudo_admin.role = "sudo_admin"
         local_sudo_admin.is_active = True
         return local_sudo_admin
