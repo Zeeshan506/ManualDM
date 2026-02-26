@@ -4,10 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from database import get_db
-from dependencies import require_admin, require_sudo_admin, get_current_user
-from models import User
-from security import hash_password
+from app.core.database import get_db
+from app.core.dependencies import require_admin, require_sudo_admin, get_current_user
+from app.db.models import User
+from app.core.security import hash_password
 
 router = APIRouter(prefix="/api/sudo", tags=["Admin Management"])
 

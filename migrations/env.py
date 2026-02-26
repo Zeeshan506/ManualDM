@@ -5,8 +5,8 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from database import Base, DATABASE_URL
-import models  # noqa: F401  Registers model metadata
+from app.core.database import Base, DATABASE_URL
+import app.db.models  # noqa: F401  Registers model metadata
 
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)

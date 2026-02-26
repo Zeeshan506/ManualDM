@@ -1,13 +1,13 @@
-import os
 import copy
 import json
+import os
 from typing import Any, Dict, List, Optional, Sequence
 
 import requests
-from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 
-from models import MetaConversionEvent
+from app.db.models import MetaConversionEvent
 
 load_dotenv()
 
@@ -31,12 +31,6 @@ def _is_viewcontent_payload(payload: Dict[str, Any]) -> bool:
 
 
 def _normalize_business_messaging_event(event_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Normalize event payloads for Meta business_messaging constraints.
-
-    Meta currently rejects event_name=Contact with action_source=business_messaging.
-    Map legacy Contact payloads to ViewContent at send time.
-    """
     normalized = copy.deepcopy(event_payload)
     if (
         str(normalized.get("action_source") or "").lower() == "business_messaging"
@@ -73,9 +67,6 @@ def _resolve_meta_credentials(
 
 
 def build_meta_payload_for_conversion_event(event: MetaConversionEvent) -> Dict[str, Any]:
-    """
-    Build a Meta Conversions API payload directly from a MetaConversionEvent row.
-    """
     if isinstance(event.full_payload, dict):
         data = event.full_payload.get("data")
         if isinstance(data, list) and data:
@@ -108,9 +99,6 @@ def build_meta_payload_for_conversion_event(event: MetaConversionEvent) -> Dict[
 
 
 def build_meta_payload_for_event_id(event_id: int, db: Session) -> Dict[str, Any]:
-    """
-    Load a MetaConversionEvent by id and build a request payload for Meta CAPI.
-    """
     event = db.query(MetaConversionEvent).filter(MetaConversionEvent.id == event_id).first()
     if not event:
         raise ValueError(f"MetaConversionEvent {event_id} not found")
@@ -126,9 +114,6 @@ def get_meta_conversion_events(
     event_name: Optional[str] = None,
     limit: int = 50,
 ) -> List[MetaConversionEvent]:
-    """
-    Query conversion events from DB to prepare posting to Meta.
-    """
     query = db.query(MetaConversionEvent)
 
     if event_ids:
@@ -151,9 +136,6 @@ def post_payload_to_meta(
     payload: Dict[str, Any],
     timeout: int = 10,
 ) -> requests.Response:
-    """
-    Send payload to Meta Conversions API.
-    """
     normalized_graph_version = GRAPH_VERSION if str(GRAPH_VERSION).startswith("v") else f"v{GRAPH_VERSION}"
     url = f"https://graph.facebook.com/{normalized_graph_version}/{pixel_id}/events"
     params = {"access_token": access_token}
@@ -179,9 +161,6 @@ def post_meta_event_by_id(
     access_token: Optional[str] = None,
     timeout: int = 10,
 ) -> Dict[str, Any]:
-    """
-    Post one MetaConversionEvent row to Meta CAPI by event id.
-    """
     event = db.query(MetaConversionEvent).filter(MetaConversionEvent.id == event_id).first()
     if not event:
         raise ValueError(f"MetaConversionEvent {event_id} not found")
@@ -233,12 +212,6 @@ def post_meta_events_batch(
     access_token: Optional[str] = None,
     timeout: int = 10,
 ) -> List[Dict[str, Any]]:
-    """
-    Post multiple conversion events loaded from DB rows.
-
-    Note:
-      - This function does not mutate event rows (no sent/failed marker columns exist yet).
-    """
     resolved_pixel_id, resolved_access_token = _resolve_meta_credentials(
         pixel_id=pixel_id,
         access_token=access_token,

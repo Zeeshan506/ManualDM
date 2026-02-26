@@ -15,7 +15,6 @@ RAW_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./webhook_events.db")
 
 
 def _with_sslmode(url: str) -> str:
-    """Ensure Postgres connections use SSL when talking to Supabase."""
     if not url.startswith("postgresql"):
         return url
     if "sslmode=" in url:
@@ -52,7 +51,7 @@ def _is_postgres_url(url: str) -> bool:
 
 
 def _alembic_config() -> Config:
-    project_root = Path(__file__).resolve().parent
+    project_root = Path(__file__).resolve().parents[2]
     config = Config(str(project_root / "alembic.ini"))
     config.set_main_option("script_location", str(project_root / "migrations"))
     config.set_main_option("sqlalchemy.url", DATABASE_URL)
@@ -76,8 +75,7 @@ def _run_postgres_migrations() -> None:
 
 
 def init_db() -> None:
-    """Initialize schema using Alembic on Postgres; create_all fallback for sqlite."""
-    import models  # noqa: F401 ensures models are registered with Base metadata
+    import app.db.models  # noqa: F401 ensures models are registered with Base metadata
 
     if _is_postgres_url(DATABASE_URL):
         auto_apply = _is_truthy(os.getenv("AUTO_APPLY_MIGRATIONS", "true"))

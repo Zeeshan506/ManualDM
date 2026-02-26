@@ -12,76 +12,48 @@ from sqlalchemy import (
     Text,
     Numeric,
     JSON,
-    UniqueConstraint,
     Index,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
-from database import Base
-
-
-# -----------------------------
-# 1️⃣ Webhook Events (Raw Logging)
-# -----------------------------
+from app.core.database import Base
 
 
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
 
     id = Column(Integer, primary_key=True)
-    source = Column(String, nullable=False)  # stripe | instagram | meta
+    source = Column(String, nullable=False)
     event_type = Column(String, nullable=True)
     external_event_id = Column(String, nullable=True, index=True)
     payload = Column(JSON, nullable=True)
     processed = Column(Boolean, default=False, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
         Index("ix_webhook_source_external", "source", "external_event_id"),
     )
 
 
-# -----------------------------
-# 2️⃣ Contact (Created on First DM)
-# -----------------------------
-
 class Contact(Base):
-
     __tablename__ = "contacts"
 
     id = Column(Integer, primary_key=True)
-
-    # Instagram sender ID
     igsid = Column(String, nullable=False, unique=True, index=True)
-
-    # Internal tracking UUID
     uuid = Column(UUID(as_uuid=True), default=uuid.uuid4, unique=True, nullable=False)
 
-    # Attribution / Tracking
     referral_id = Column(String, nullable=True, index=True)
     first_event_id = Column(String, nullable=True)
     first_event_name = Column(String, nullable=True)
 
     platform = Column(String, nullable=False, default="instagram")
 
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     last_message_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Relationships
-    messages = relationship(
-        "Message", back_populates="contact", cascade="all, delete-orphan"
-    )
+    messages = relationship("Message", back_populates="contact", cascade="all, delete-orphan")
     lead = relationship("Lead", back_populates="contact", uselist=False)
-
-
-# -----------------------------
-# 3️⃣ Messages (ALL DMs)
-# -----------------------------
 
 
 class Message(Base):
@@ -96,7 +68,7 @@ class Message(Base):
         index=True,
     )
 
-    direction = Column(String, nullable=False, index=True)  # inbound | outbound
+    direction = Column(String, nullable=False, index=True)
 
     text_raw = Column(Text, nullable=True)
     text_cleaned = Column(Text, nullable=True)
@@ -106,16 +78,9 @@ class Message(Base):
 
     processed = Column(Boolean, default=False, nullable=False, index=True)
 
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     contact = relationship("Contact", back_populates="messages")
-
-
-# -----------------------------
-# 4️⃣ Users (Authentication + Authorization)
-# -----------------------------
 
 
 class User(Base):
@@ -133,12 +98,6 @@ class User(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
     assigned_leads = relationship("Lead", back_populates="assignee")
-
-
-# -----------------------------
-# 5️⃣ Lead (Created When Qualified)
-# -----------------------------
-
 
 
 class Lead(Base):
@@ -165,23 +124,14 @@ class Lead(Base):
     lead_status = Column(String, nullable=False, default="unassigned")
 
     status = Column(String, nullable=False, default="new")
-    # new | invoiced | paid | cancelled
+    referral_payload = Column(JSON, nullable=True)
 
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     converted_at = Column(DateTime(timezone=True), nullable=True)
 
     contact = relationship("Contact", back_populates="lead")
     assignee = relationship("User", back_populates="assigned_leads")
-    invoices = relationship(
-        "Invoice", back_populates="lead", cascade="all, delete-orphan"
-    )
-
-
-# -----------------------------
-# 6️⃣ Invoice (Stripe Mapping)
-# -----------------------------
+    invoices = relationship("Invoice", back_populates="lead", cascade="all, delete-orphan")
 
 
 class Invoice(Base):
@@ -189,9 +139,7 @@ class Invoice(Base):
 
     id = Column(Integer, primary_key=True)
 
-    lead_id = Column(
-        Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
-    )
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)
 
     stripe_invoice_id = Column(String, nullable=False, unique=True, index=True)
     stripe_customer_id = Column(String, nullable=True, index=True)
@@ -200,22 +148,12 @@ class Invoice(Base):
     currency = Column(String, nullable=False, default="usd")
 
     status = Column(String, nullable=False, default="draft")
-    # draft | sent | paid | failed
 
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     paid_at = Column(DateTime(timezone=True), nullable=True)
 
     lead = relationship("Lead", back_populates="invoices")
-    payment_events = relationship(
-        "PaymentEvent", back_populates="invoice", cascade="all, delete-orphan"
-    )
-
-
-# -----------------------------
-# 7️⃣ Payment Events (Stripe Webhook + CAPI Control)
-# -----------------------------
+    payment_events = relationship("PaymentEvent", back_populates="invoice", cascade="all, delete-orphan")
 
 
 class PaymentEvent(Base):
@@ -233,21 +171,14 @@ class PaymentEvent(Base):
     stripe_event_id = Column(String, nullable=False, unique=True, index=True)
 
     amount = Column(Numeric(10, 2), nullable=False)
-    event_type = Column(String, nullable=False)  # invoice.paid
+    event_type = Column(String, nullable=False)
 
     capi_sent = Column(Boolean, default=False, nullable=False)
     capi_event_id = Column(String, nullable=True)
 
-    created_at = Column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     invoice = relationship("Invoice", back_populates="payment_events")
-
-
-# -----------------------------
-# 8️⃣ Meta Conversion Events (Custom Events)
-# -----------------------------
 
 
 class MetaConversionEvent(Base):
@@ -255,29 +186,20 @@ class MetaConversionEvent(Base):
 
     id = Column(Integer, primary_key=True)
 
-    # optional relation to internal Lead
     lead_id = Column(Integer, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True)
 
-    # Core event fields (mirror payload)
-    event_name = Column(String, nullable=False, index=True)           # e.g. "Purchase"
-    event_time = Column(Integer, nullable=False)                       # unix timestamp
-    event_id = Column(String, nullable=True, index=True)               # uuid for deduplication
-    action_source = Column(String, nullable=True)                      # e.g. "business_messaging"
-    messaging_channel = Column(String, nullable=True)                  # e.g. "instagram"
+    event_name = Column(String, nullable=False, index=True)
+    event_time = Column(Integer, nullable=False)
+    event_id = Column(String, nullable=True, index=True)
+    action_source = Column(String, nullable=True)
+    messaging_channel = Column(String, nullable=True)
 
-    # Raw structured parts of the payload
     user_data = Column(JSON, nullable=True)
     custom_data = Column(JSON, nullable=True)
 
-    # Top-level partner agent field
     partner_agent = Column(String, nullable=True)
-
-    # Store the full payload for audit/debug
     full_payload = Column(JSON, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
-    # relationships
     lead = relationship("Lead", backref="meta_conversion_events")
-
-

@@ -1,22 +1,17 @@
 from datetime import datetime
 from typing import Any
+
 from sqlalchemy.orm import Session
 
-from models import WebhookEvent
+from app.db.models import WebhookEvent
 
 
 def persist_webhook_event(raw_body_text: str, data: Any, db: Session) -> dict:
-    """
-    Persist a WebhookEvent using the schema from models.WebhookEvent.
-
-    Returns a summary dict with keys: status_tag, event_id, existing (always False here).
-    """
     status_tag = "EVENT_RECEIVED" if isinstance(data, dict) and data.get("object") == "instagram" else "IGNORED"
 
     source = data.get("object") if isinstance(data, dict) else None
     event_type = status_tag
 
-    # Try to extract an external event id (message id) when available
     external_event_id = None
     try:
         if isinstance(data, dict):

@@ -1,152 +1,176 @@
-# Webhook Processing (Non-Blocking)
+# CRM Backend (FastAPI + Celery)
 
-Webhook endpoints now do minimal work in-request:
-- Persist raw webhook event
-- Enqueue `tasks.process_webhook_event`
-- Return response
+## Overview
 
-Heavy database processing and outbound Meta calls run in Celery workers.
+This service handles:
+- Instagram webhook ingestion and persistence
+- Lead/contact/message lifecycle
+- Meta Conversion event creation + async dispatch
+- Staff authentication and user management
+- Lead payment recording (custom payments now, Stripe path reserved)
 
-## API Route Organization
+## Backend Structure (Cleaned)
 
-All API endpoints are now properly registered through the FastAPI router pattern:
-- Routes defined in `routes/api.py` using `APIRouter`
-- Router included in `main.py` via `app.include_router(api_router)`
-- All endpoints prefixed with `/api` and properly structured
+Canonical code now lives under:
 
-**Available Endpoints:**
-- `GET /api/leads` - Fetch all leads
-- `GET /api/leads/{lead_id}` - Get specific lead details
-- `GET /api/leads/{lead_id}/messages` - Fetch chat history for a lead
-- `GET /api/dashboard/stats` - Get dashboard metrics
-- `GET /api/dashboard/activity` - Get recent dashboard activity feed
+- `app/core/` - database, security, dependencies, celery setup
+- `app/db/` - SQLAlchemy models
+- `app/api/routes/` - API route modules
+- `app/services/` - feature services
+- `app/tasks/` - Celery task modules
+- `app/scripts/` - reserved for operational scripts
 
-## Database Schema Sync (Postgres)
+Top-level compatibility shims have been removed; runtime and imports should use `app.*` module paths.
 
-The API now auto-runs Alembic on startup when using Postgres:
-- Runs `upgrade head`
-- Detects model drift from `models.py`
-- Auto-generates a migration file in `migrations/versions/`
-- Applies the new migration immediately
+Webhook handling is intentionally non-blocking:
+1. Save webhook payload to `webhook_events`
+2. Enqueue async processing (`tasks.process_webhook_event`)
+3. Return quickly
 
-You can disable auto-generation (while still applying existing migrations) with:
-- `AUTO_APPLY_MIGRATIONS=false`
-
-## Prerequisites
-
-- Redis available via `REDIS_CONNECTION_STRING` (hosted or local)
-- Python dependencies installed from `requirements.txt`
-
-## Run API
+## Run
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-
-## Run Celery Worker
 
 ```bash
-celery -A celery_app.celery_app worker --loglevel=info
+celery -A app.core.celery_app.celery_app worker --loglevel=info
 ```
 
-## Environment Variables
+## Route Map
 
-### Required
-- `VERIFY_TOKEN` - Token to verify webhooks from Meta/Instagram
-- `DATABASE_URL` - PostgreSQL connection string for development
-- `REDIS_CONNECTION_STRING` - Redis connection for Celery task queue
-- `ACCESS_TOKEN` - Meta access token for Conversions API
-- `DATASET_ID` - Meta Dataset/Pixel ID
-- `INSTAGRAM_ACCOUNT_ID` - Instagram Business Account ID
+### Webhook / Legacy App Endpoints (`app/main.py`)
 
-### Instagram Graph API
-- `IG_GRAPH_VERSION` (default: `24.0`) - Instagram Graph API version
-- `IG_MESSAGING_PRODUCT` (default: `instagram`) - Messaging product identifier
-- `IG_AUTOREPLY_TEXT` - Auto-reply message sent on first contact
+- `GET /webhook` - Meta webhook verification
+# CRM Backend (FastAPI + Celery)
 
-### Database & Migrations
-- `DATABASE_URL_RENDER` - Postgres with transaction pooling for production (recommended for Render/Supabase)
-- `AUTO_APPLY_MIGRATIONS` (default: `false`) - Auto-run Alembic migrations on startup (Postgres only)
+This repository contains the backend API and worker for the CRM system. The service exposes HTTP APIs (FastAPI) and runs background jobs with Celery.
 
-### Celery Task Configuration
-- `REDIS_CONNECTION_STRING` - Base Redis URL for Celery broker/results
-- `CELERY_BROKER_URL` (default: `REDIS_CONNECTION_STRING` with db `0`, fallback `redis://127.0.0.1:6379/0`)
-- `CELERY_RESULT_BACKEND` (default: `REDIS_CONNECTION_STRING` with db `1`, fallback `redis://127.0.0.1:6379/1`)
-- `TASK_REPEAT_COUNT` (default: `3`) - Global retry count for all Celery tasks
-- `REPEAT_COUNT` - Global retry count fallback (if `TASK_REPEAT_COUNT` not set)
-- `<TASK_NAME>_REPEAT_COUNT` - Per-task override (example: `SEND_AUTOMATION_REPLY_REPEAT_COUNT=5`)
+**Quick overview**
+- API server: `app.main:app` (FastAPI)
+- Celery worker: `app.core.celery_app.celery_app`
+- DB models: `app/db/models.py` (SQLAlchemy)
+- Migrations: `migrations/` (Alembic)
 
-## Meta Conversions API Configuration
+**Run locally (development)**
 
-For posting conversion events to Meta, configure these variables:
-- `DATASET_ID` - Used as Pixel/Dataset id in `/{dataset_id}/events` endpoint
-- `ACCESS_TOKEN` - Meta token passed as `access_token` parameter
-
-**Backward-compatible fallbacks:**
-- `META_PIXEL_ID` - Fallback for `DATASET_ID`
-- `META_ACCESS_TOKEN` - Fallback for `ACCESS_TOKEN`
-
-**Graph API version resolution order:**
-1. `META_GRAPH_VERSION`
-2. `IG_GRAPH_VERSION`
-3. Default `v25.0`
-
-### Event Send Behavior
-
-**ViewContent** (first-contact referral event):
-- ✅ Recorded in `meta_conversion_events` database table
-- ❌ NOT sent to Meta Conversions API (intentionally skipped)
-- Useful for tracking but Meta doesn't process this event type for business_messaging
-
-## Create Custom Meta Event From Database Lead
-
-Use this endpoint to create a custom event row from a lead record and optionally queue async posting to Meta:
+Start the API (reload on changes):
 
 ```bash
-curl -X POST http://localhost:8000/leads/123/meta-events \
-	-H 'Content-Type: application/json' \
-	-d '{
-		"event_name": "Purchase",
-		"custom_data": {
-			"currency": "usd",
-			"value": 123.45,
-			"contents": [{"id": "product123", "quantity": 1}]
-		},
-		"send_now": true
-	}'
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-Notes:
-- The event is persisted in `meta_conversion_events`.
-- `user_data` is automatically enriched from lead/contact data (hashed email/phone and ig sid when available).
-- Setting `send_now=false` stores the event only (no queue to Meta post task).
-
-## Active Meta Event Flow (Current)
-
-Implemented events:
-
-- **ViewContent** (Contact event)
-  - Triggered when an incoming Instagram webhook contains a `referral` section
-  - Recorded in database but **not sent to Meta** (intentional)
-  - Useful for internal tracking and attribution
-
-- **LeadSubmitted**
-  - Triggered when both email and phone are present for a lead
-  - Sent to Meta Conversions API
-  - Mock invoice generated for testing
-
-- **Purchase**
-  - Triggered via API endpoint for testing
-  - Sent to Meta Conversions API
-  - Stripe webhook integration planned for production
+Start Celery worker (in another shell):
 
 ```bash
-curl -X POST http://localhost:8000/leads/123/mock-purchase \
-	-H 'Content-Type: application/json' \
-	-d '{
-		"value": 123.00,
-		"currency": "USD",
-		"send_now": true
-	}'
+celery -A app.core.celery_app.celery_app worker --loglevel=info
 ```
+
+For production use on Railway, bind to the `PORT` env var (see Railway section).
+
+**Railway deployment (recommended commands)**
+
+When deploying to Railway, ensure the service command binds to `$PORT`. Example `start` commands:
+
+- Simple (dev / quick test):
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+- Recommended production option (use Gunicorn + Uvicorn workers):
+
+```bash
+gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT --workers 2
+```
+
+If you run Celery on Railway as a separate service, set a separate service with the command:
+
+```bash
+celery -A app.core.celery_app.celery_app worker --loglevel=info --concurrency=1
+```
+
+Railway environment variables to set (at minimum): `DATABASE_URL`, `REDIS_CONNECTION_STRING`, `VERIFY_TOKEN`, `ACCESS_TOKEN`, `IG_ACCOUNT_ID` (or `INSTAGRAM_ACCOUNT_ID`).
+
+Example minimal `Procfile` (if using one):
+
+```
+web: gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT
+worker: celery -A app.core.celery_app.celery_app worker --loglevel=info
+```
+
+File structure (backend-focused)
+
+```
+test_server/
+├─ alembic.ini
+├─ pyproject.toml
+├─ requirements.txt
+├─ README.md
+├─ payload.json
+├─ app/
+│  ├─ __init__.py
+│  ├─ main.py                # FastAPI app and legacy webhook handlers
+│  ├─ core/
+│  │  ├─ __init__.py
+│  │  ├─ celery_app.py      # Celery app instance
+│  │  ├─ database.py        # DB session / engine
+│  │  ├─ dependencies.py
+│  │  └─ security.py
+│  ├─ api/
+│  │  ├─ __init__.py
+│  │  └─ routes/            # api route modules (auth, users, leads, admin, etc.)
+│  ├─ db/
+│  │  ├─ __init__.py
+│  │  └─ models.py          # SQLAlchemy models (leads, users, invoices, etc.)
+│  ├─ services/
+│  │  └─ meta_conversion_events.py
+│  ├─ tasks/
+│  │  └─ meta_tasks.py      # Celery tasks
+│  └─ scripts/
+│     ├─ backfill_lead_referrals.py
+│     └─ seed_user.py
+├─ database/                 # raw SQL helpers / schema SQL
+├─ migrations/               # Alembic migration versions
+└─ ProgressionPlan.md
+```
+
+Notes about key folders
+
+- `app/core/` — application wiring: DB, Celery, auth/ security helpers and dependency injection.
+- `app/api/routes/` — HTTP endpoints. Prefer adding new endpoints under `routes/` and keeping `app.main` small.
+- `app/db/models.py` — canonical SQLAlchemy models used across the app and Celery tasks.
+- `app/services/` — domain logic (event building, payment processing, referral resolution).
+- `app/tasks/` — background tasks that post to external APIs (Meta CAPI) and update DB state.
+
+Environment variables
+
+Required (at least for a running deployment):
+
+- `DATABASE_URL` — Postgres connection string
+- `REDIS_CONNECTION_STRING` — Redis for Celery broker/result backend
+- `VERIFY_TOKEN` — webhook verification token
+- `ACCESS_TOKEN` — Meta/IG access token used by the services
+
+Optional / feature flags:
+
+- `IG_ACCOUNT_ID` or `INSTAGRAM_ACCOUNT_ID`
+- `META_GRAPH_VERSION` (defaults to v25.0 in code)
+- `AUTO_APPLY_MIGRATIONS` — if true, the app will run alembic migrations on startup
+
+Developer scripts
+
+- Backfill lead referrals (dry-run):
+
+```bash
+python app/scripts/backfill_lead_referrals.py --dry-run
+```
+
+Tips and recommendations
+
+- Bind to `$PORT` on Railway. Use Gunicorn+Uvicorn for production.
+- Run Celery as a separate Railway service (or use a dedicated worker dyno) and configure Redis accordingly.
+- Keep secrets in Railway environment variables, not in the repo.
+
+If you'd like, I can also add a `Procfile` or a Railway service template and a minimal `Dockerfile` for explicit container deployments.
 

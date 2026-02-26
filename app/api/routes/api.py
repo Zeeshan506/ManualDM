@@ -1,17 +1,17 @@
 from fastapi import Depends, HTTPException, Query, status, APIRouter
 from pydantic import BaseModel
 from sqlalchemy.orm import joinedload, Session
-from database import get_db
+from app.core.database import get_db
 from sqlalchemy import func
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import uuid
 
-from celery_app import celery_app
-from dependencies import get_current_user
-from models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
-from models import PaymentEvent
-from services.meta_conversion_events import persist_purchase_event_for_lead
+from app.core.celery_app import celery_app
+from app.core.dependencies import get_current_user
+from app.db.models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
+from app.db.models import PaymentEvent
+from app.services.meta_conversion_events import persist_purchase_event_for_lead
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
 

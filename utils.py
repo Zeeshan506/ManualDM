@@ -8,7 +8,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from models import Message, Contact, Lead
+from app.db.models import Message, Contact, Lead
 
 load_dotenv()
 
@@ -221,6 +221,41 @@ def _extract_inbound_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return extracted
 
 
+def _extract_referral_from_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    direct_referral = payload.get("referral")
+    if isinstance(direct_referral, dict):
+        return direct_referral
+
+    value_referral = payload.get("value")
+    if isinstance(value_referral, dict):
+        nested_referral = value_referral.get("referral")
+        if isinstance(nested_referral, dict):
+            return nested_referral
+
+    postback = payload.get("postback")
+    if isinstance(postback, dict):
+        postback_referral = postback.get("referral")
+        if isinstance(postback_referral, dict):
+            return postback_referral
+
+    for key in ("entry", "messaging", "changes", "messages"):
+        node = payload.get(key)
+        if isinstance(node, list):
+            for item in node:
+                found = _extract_referral_from_payload(item)
+                if found:
+                    return found
+        elif isinstance(node, dict):
+            found = _extract_referral_from_payload(node)
+            if found:
+                return found
+
+    return None
+
+
 # -----------------------------
 # Fingerprinting / Volatile stripping
 # -----------------------------
@@ -264,16 +299,24 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
         return None
 
     message_text = _extract_inbound_message_text(payload)
+    referral = _extract_referral_from_payload(payload)
+    referral_id = None
+    if isinstance(referral, dict):
+        raw_referral_id = referral.get("ref") or referral.get("referral_id") or referral.get("source")
+        if raw_referral_id is not None:
+            referral_id = str(raw_referral_id)
     now = datetime.utcnow()
 
     contact = db.query(Contact).filter(Contact.igsid == str(sender_id)).first()
     if contact:
         contact.last_message_at = now
+        if referral_id and not contact.referral_id:
+            contact.referral_id = referral_id
         created_contact = False
     else:
         contact = Contact(
             igsid=str(sender_id),
-            referral_id=None,
+            referral_id=referral_id,
             platform="instagram",
             created_at=now,
             last_message_at=now,
@@ -285,11 +328,14 @@ def upsert_lead_from_payload(payload: Dict[str, Any], db: Session) -> Optional[D
     # Ensure a Lead exists for this contact (lead created when qualified)
     if contact.lead:
         lead = contact.lead
+        if referral and not lead.referral_payload:
+            lead.referral_payload = referral
         created_lead = False
     else:
         lead = Lead(
             contact_id=contact.id,
             status="new",
+            referral_payload=referral,
             created_at=now,
         )
         db.add(lead)

@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
-from database import SessionLocal
-from models import User
+from app.core.database import SessionLocal
+from app.db.models import User
 from passlib.context import CryptContext
 import os
 

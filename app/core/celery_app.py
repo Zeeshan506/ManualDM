@@ -1,9 +1,11 @@
 import os
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
 from celery import Celery
 from dotenv import load_dotenv
 
 load_dotenv()
+
 
 def _redis_url_with_db(redis_url: str, db_index: int) -> str:
     parsed = urlparse(redis_url)
@@ -16,7 +18,6 @@ def _redis_url_with_db(redis_url: str, db_index: int) -> str:
 
 REDIS_CONNECTION_STRING = os.getenv("REDIS_CONNECTION_STRING")
 DEFAULT_REDIS_BASE = REDIS_CONNECTION_STRING or "redis://127.0.0.1:6379"
-# DEFAULT_REDIS_BASE = "redis://127.0.0.1:6379"
 BROKER_URL = os.getenv(
     "CELERY_BROKER_URL",
     _redis_url_with_db(DEFAULT_REDIS_BASE, 0),
@@ -30,7 +31,7 @@ celery_app = Celery(
     "test_server",
     broker=BROKER_URL,
     backend=RESULT_BACKEND,
-    include=["tasks.meta_tasks"],
+    include=["app.tasks.meta_tasks"],
 )
 
 celery_app.conf.update(

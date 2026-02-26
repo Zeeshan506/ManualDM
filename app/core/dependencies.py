@@ -1,22 +1,20 @@
 import os
 
 from typing import Annotated
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from database import get_db
-from models import User
-from security import decode_access_token
+from app.core.database import get_db
+from app.db.models import User
+from app.core.security import decode_access_token
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
 load_dotenv()
-SUDO_ADMIN_BACKUP = (
-    os.getenv("SUDO_ADMIN_BACKUP")
-)
+SUDO_ADMIN_BACKUP = os.getenv("SUDO_ADMIN_BACKUP")
 SUDO_USER_ID = os.getenv("SUDO_USER_ID")
 
 

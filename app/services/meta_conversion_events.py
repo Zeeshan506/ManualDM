@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
-from models import Lead, MetaConversionEvent
+from app.db.models import Lead, Message, MetaConversionEvent
 
 
 IG_BUSINESS_ACCOUNT_ID = (
@@ -49,6 +49,77 @@ def _create_event_id() -> str:
     return str(uuid.uuid4())
 
 
+def _extract_referral_from_payload(payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+
+    direct_referral = payload.get("referral")
+    if isinstance(direct_referral, dict):
+        return direct_referral
+
+    value_referral = payload.get("value")
+    if isinstance(value_referral, dict):
+        nested_referral = value_referral.get("referral")
+        if isinstance(nested_referral, dict):
+            return nested_referral
+
+    postback = payload.get("postback")
+    if isinstance(postback, dict):
+        postback_referral = postback.get("referral")
+        if isinstance(postback_referral, dict):
+            return postback_referral
+
+    for key in ("entry", "messaging", "changes", "messages"):
+        node = payload.get(key)
+        if isinstance(node, list):
+            for item in node:
+                found = _extract_referral_from_payload(item)
+                if found:
+                    return found
+        elif isinstance(node, dict):
+            found = _extract_referral_from_payload(node)
+            if found:
+                return found
+
+    return None
+
+
+def _get_latest_lead_referral(db: Session, *, lead: Lead) -> Optional[Dict[str, Any]]:
+    stored_referral = getattr(lead, "referral_payload", None)
+    if isinstance(stored_referral, dict) and stored_referral:
+        return stored_referral
+
+    if not lead.contact_id:
+        return None
+
+    recent_messages = (
+        db.query(Message)
+        .filter(Message.contact_id == lead.contact_id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(50)
+        .all()
+    )
+
+    for message in recent_messages:
+        referral = _extract_referral_from_payload(message.payload)
+        if referral:
+            lead.referral_payload = referral
+            db.flush()
+            return referral
+
+    return None
+
+
+def _safe_get_latest_lead_referral(db: Session, *, lead: Lead) -> Optional[Dict[str, Any]]:
+    try:
+        referral = _get_latest_lead_referral(db, lead=lead)
+        if isinstance(referral, dict) and referral:
+            return referral
+    except Exception:
+        return None
+    return None
+
+
 def _build_base_event(*, event_name: str, event_time: Optional[int] = None) -> Dict[str, Any]:
     resolved_event_time = int(event_time) if event_time is not None else int(datetime.utcnow().timestamp())
     return {
@@ -81,6 +152,7 @@ def _build_leadsubmitted_payload(
     hashed_email: str,
     hashed_phone: str,
     mock_invoice_id: Optional[str] = None,
+    referral: Optional[Dict[str, Any]] = None,
     event_time: Optional[int] = None,
 ) -> Dict[str, Any]:
     event: Dict[str, Any] = _build_base_event(event_name="LeadSubmitted", event_time=event_time)
@@ -98,6 +170,8 @@ def _build_leadsubmitted_payload(
         "mock_invoice_generated": True,
         "mock_invoice_id": mock_invoice_id or f"mock-invoice-{lead.id}-{int(datetime.utcnow().timestamp())}",
     }
+    if referral:
+        event["custom_data"]["referral"] = referral
 
     return {"data": [event]}
 
@@ -110,6 +184,7 @@ def _build_purchase_payload(
     hashed_phone: Optional[str],
     value: float,
     currency: str,
+    referral: Optional[Dict[str, Any]] = None,
     event_time: Optional[int] = None,
 ) -> Dict[str, Any]:
     event: Dict[str, Any] = _build_base_event(event_name="Purchase", event_time=event_time)
@@ -129,6 +204,8 @@ def _build_purchase_payload(
         "value": float(value),
         "currency": str(currency).upper(),
     }
+    if referral:
+        event["custom_data"]["referral"] = referral
 
     return {"data": [event]}
 
@@ -249,12 +326,15 @@ def persist_leadsubmitted_event_for_lead(
     if not igsid:
         raise ValueError(f"Lead {lead_id} has no related contact IGSID")
 
+    referral = _safe_get_latest_lead_referral(db, lead=lead)
+
     payload = _build_leadsubmitted_payload(
         lead=lead,
         igsid=str(igsid),
         hashed_email=hashed_email,
         hashed_phone=hashed_phone,
         mock_invoice_id=mock_invoice_id,
+        referral=referral,
         event_time=event_time,
     )
     event_data = payload["data"][0]
@@ -301,6 +381,7 @@ def persist_purchase_event_for_lead(
     normalized_phone = _normalize_phone(phone if phone is not None else lead.phone)
     hashed_email = _sha256(normalized_email) if normalized_email else None
     hashed_phone = _sha256(normalized_phone) if normalized_phone else None
+    referral = _safe_get_latest_lead_referral(db, lead=lead)
 
     payload = _build_purchase_payload(
         lead=lead,
@@ -309,6 +390,7 @@ def persist_purchase_event_for_lead(
         hashed_phone=hashed_phone,
         value=float(value),
         currency=currency,
+        referral=referral,
         event_time=event_time,
     )
     event_data = payload["data"][0]

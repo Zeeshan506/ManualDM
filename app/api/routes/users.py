@@ -2,8 +2,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from dependencies import get_current_user
-from models import User
+from app.core.dependencies import get_current_user
+from app.db.models import User
 
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
