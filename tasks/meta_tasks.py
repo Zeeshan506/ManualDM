@@ -5,7 +5,7 @@ from celery import Task
 
 from celery_app import celery_app
 from database import SessionLocal
-from models import WebhookEvent
+from models import PaymentEvent, WebhookEvent
 from services.event_handlers import handle_event_received
 from services.post_leads_to_meta import post_meta_event_by_id
 from utils import append_chat_message, automation_mail
@@ -146,6 +146,16 @@ def post_meta_conversion_event(self, *, event_id: int) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         result = post_meta_event_by_id(db, event_id=event_id)
+		if isinstance(result, dict) and result.get("status") != "skipped":
+			status_code = result.get("status_code")
+			if isinstance(status_code, int) and 200 <= status_code < 300:
+				db.query(PaymentEvent).filter(
+					PaymentEvent.capi_event_id == str(event_id)
+				).update(
+					{PaymentEvent.capi_sent: True},
+					synchronize_session=False,
+				)
+				db.commit()
         task_status = result.get("status") if isinstance(result, dict) else None
         return {
             "status": task_status or "posted",

@@ -1,12 +1,38 @@
 from fastapi import Depends, HTTPException, Query, status, APIRouter
+from pydantic import BaseModel
 from sqlalchemy.orm import joinedload, Session
 from database import get_db
 from sqlalchemy import func
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import uuid
+
+from celery_app import celery_app
 from dependencies import get_current_user
 from models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
+from models import PaymentEvent
+from services.meta_conversion_events import persist_purchase_event_for_lead
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
+
+
+class CustomLeadPaymentPayload(BaseModel):
+    amount: float
+    currency: str = "USD"
+    send_now: bool = True
+
+
+def _ensure_lead_payment_access(*, lead: Lead, current_user: User) -> None:
+    if current_user.role == "sales_rep" and lead.assigned_to != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sales reps can only access payments for their assigned leads",
+        )
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access lead payments",
+        )
 
 @router.get("/leads")
 def get_all_leads(
@@ -305,3 +331,210 @@ def get_dashboard_activity(
 
     activity_items.sort(key=_timestamp_sort_key, reverse=True)
     return activity_items[:limit]
+
+
+@router.post("/leads/{lead_id}/payments/custom")
+def create_custom_lead_payment(
+    lead_id: int,
+    body: CustomLeadPaymentPayload,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    amount_input = body.amount
+    if amount_input <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="amount must be greater than 0",
+        )
+
+    currency = (body.currency or "").strip().upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="currency must be a 3-letter ISO code",
+        )
+
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    _ensure_lead_payment_access(lead=lead, current_user=current_user)
+
+    try:
+        normalized_amount = Decimal(str(amount_input)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid amount",
+        )
+
+    if normalized_amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="amount must be greater than 0",
+        )
+
+    created_at = datetime.utcnow()
+    manual_invoice_id = f"manual-invoice-{lead_id}-{uuid.uuid4().hex[:12]}"
+    manual_payment_event_id = f"manual-payment-{lead_id}-{uuid.uuid4().hex[:12]}"
+
+    try:
+        invoice = Invoice(
+            lead_id=lead.id,
+            stripe_invoice_id=manual_invoice_id,
+            stripe_customer_id=None,
+            amount=normalized_amount,
+            currency=currency.lower(),
+            status="paid",
+            created_at=created_at,
+            paid_at=created_at,
+        )
+        db.add(invoice)
+        db.flush()
+
+        payment_event = PaymentEvent(
+            invoice_id=invoice.id,
+            stripe_event_id=manual_payment_event_id,
+            amount=normalized_amount,
+            event_type="custom.payment",
+            capi_sent=False,
+            capi_event_id=None,
+            created_at=created_at,
+        )
+        db.add(payment_event)
+        db.flush()
+
+        meta_event = persist_purchase_event_for_lead(
+            db,
+            lead_id=lead.id,
+            value=float(normalized_amount),
+            currency=currency,
+            email=lead.email,
+            phone=lead.phone,
+        )
+        db.flush()
+
+        payment_event.capi_event_id = str(meta_event.id)
+
+        lead.status = "paid"
+        if lead.converted_at is None:
+            lead.converted_at = created_at
+
+        db.commit()
+        db.refresh(meta_event)
+        db.refresh(invoice)
+        db.refresh(payment_event)
+        db.refresh(lead)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+    task_id = None
+    if body.send_now:
+        task = celery_app.send_task(
+            "tasks.post_meta_conversion_event",
+            kwargs={"event_id": int(meta_event.id)},
+        )
+        task_id = task.id
+
+    return {
+        "status": "created",
+        "lead_id": lead.id,
+        "invoice_id": invoice.id,
+        "invoice_reference": invoice.stripe_invoice_id,
+        "invoice_status": invoice.status,
+        "payment_event_id": payment_event.id,
+        "payment_reference": payment_event.stripe_event_id,
+        "payment_event_type": payment_event.event_type,
+        "payment_capi_sent": payment_event.capi_sent,
+        "payment_capi_event_id": payment_event.capi_event_id,
+        "payment_created_at": payment_event.created_at.isoformat() if payment_event.created_at else None,
+        "amount": float(normalized_amount),
+        "currency": currency,
+        "meta_event_id": int(meta_event.id),
+        "event_name": meta_event.event_name,
+        "queued_for_meta": bool(body.send_now),
+        "task_id": task_id,
+    }
+
+
+@router.get("/leads/{lead_id}/payments")
+def get_lead_payments(
+    lead_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    _ensure_lead_payment_access(lead=lead, current_user=current_user)
+
+    invoices = (
+        db.query(Invoice)
+        .filter(Invoice.lead_id == lead_id)
+        .order_by(Invoice.paid_at.desc().nullslast(), Invoice.created_at.desc(), Invoice.id.desc())
+        .all()
+    )
+
+    invoice_ids = [invoice.id for invoice in invoices]
+    payment_events_by_invoice: dict[int, list[PaymentEvent]] = {invoice_id: [] for invoice_id in invoice_ids}
+    if invoice_ids:
+        payment_events = (
+            db.query(PaymentEvent)
+            .filter(PaymentEvent.invoice_id.in_(invoice_ids))
+            .order_by(PaymentEvent.created_at.desc(), PaymentEvent.id.desc())
+            .all()
+        )
+        for payment_event in payment_events:
+            payment_events_by_invoice.setdefault(payment_event.invoice_id, []).append(payment_event)
+
+    items = []
+    total_paid_amount = Decimal("0.00")
+
+    for invoice in invoices:
+        if invoice.status == "paid":
+            total_paid_amount += Decimal(str(invoice.amount or 0))
+
+        invoice_payment_events = payment_events_by_invoice.get(invoice.id, [])
+        items.append(
+            {
+                "invoice": {
+                    "id": invoice.id,
+                    "reference": invoice.stripe_invoice_id,
+                    "status": invoice.status,
+                    "amount": float(invoice.amount),
+                    "currency": (invoice.currency or "").upper(),
+                    "created_at": invoice.created_at.isoformat() if invoice.created_at else None,
+                    "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
+                },
+                "payments": [
+                    {
+                        "id": payment_event.id,
+                        "reference": payment_event.stripe_event_id,
+                        "event_type": payment_event.event_type,
+                        "amount": float(payment_event.amount),
+                        "capi_sent": payment_event.capi_sent,
+                        "capi_event_id": payment_event.capi_event_id,
+                        "created_at": payment_event.created_at.isoformat() if payment_event.created_at else None,
+                    }
+                    for payment_event in invoice_payment_events
+                ],
+            }
+        )
+
+    return {
+        "lead_id": lead.id,
+        "invoice_count": len(invoices),
+        "total_paid_amount": float(total_paid_amount),
+        "items": items,
+    }
