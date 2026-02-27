@@ -206,7 +206,8 @@ def update_user_password(
 ):
     """
     Update a user's password.
-    Users can only update their own password.
+    - Sudo admins can update their own password and any non-sudo_admin password.
+    - Admins can update their own password and sales_rep passwords only.
     """
     target_user = db.query(User).filter(User.id == user_id).first()
     if not target_user:
@@ -215,11 +216,18 @@ def update_user_password(
             detail="User not found",
         )
 
-    # Users can only change their own password
-    if current_user.id != user_id:
+    can_update_password = False
+    if current_user.role == "sudo_admin":
+        is_self = target_user.username == current_user.username
+        can_update_password = is_self or target_user.role != "sudo_admin"
+    elif current_user.role == "admin":
+        is_self = target_user.id == current_user.id
+        can_update_password = is_self or target_user.role == "sales_rep"
+
+    if not can_update_password:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only change your own password",
+            detail="You do not have permission to update this user password",
         )
 
     target_user.hashed_password = hash_password(body.password)
