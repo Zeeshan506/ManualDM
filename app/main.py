@@ -68,6 +68,7 @@ class LeadMetaEventPayload(BaseModel):
     send_now: bool = True
 
 
+
 class MockPurchasePayload(BaseModel):
     value: float
     currency: str = "USD"
