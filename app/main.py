@@ -24,11 +24,15 @@ from app.api.routes.users import router as users_router
 
 app = FastAPI()
 
+frontend_url = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
+allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+if frontend_url:
+    allowed_origins.append(frontend_url)
+
 # --- Add the CORS Configuration Here ---
 app.add_middleware(
     CORSMiddleware,
-    # In production, replace the wildcard or localhost with your actual Vercel/frontend domain.
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], 
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
     allow_headers=["*"],  # Allows all headers
