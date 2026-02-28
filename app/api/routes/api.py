@@ -31,18 +31,25 @@ def _ensure_lead_payment_access(*, lead: Lead, current_user: User) -> None:
 
 
 def _lead_engagement_payload(lead: Lead) -> dict:
-    engaged_by_username = None
+    owner_username = None
     if lead.assigned_to is not None:
-        engaged_by_username = (
+        owner_username = (
             lead.assignee.username
             if lead.assignee is not None
             else f"User #{lead.assigned_to}"
         )
 
+    is_occupied = lead.lead_status == "active"
+    occupancy_status = "occupied" if is_occupied else "unoccupied"
+
     return {
+        "ownerUserId": lead.assigned_to,
+        "ownerUsername": owner_username,
+        "occupancyStatus": occupancy_status,
+        "leadStatus": lead.lead_status,
         "engagedByUserId": lead.assigned_to,
-        "engagedByUsername": engaged_by_username,
-        "isEngaged": lead.assigned_to is not None,
+        "engagedByUsername": owner_username,
+        "isEngaged": is_occupied,
     }
 
 @router.get("/leads")
@@ -117,10 +124,7 @@ def assign_lead_to_current_user(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Mark a chat as engaged by the current user.
-    Sales reps cannot engage a chat already engaged by another sales rep.
-    """
+    """Mark a chat as occupied and set owner only on first claim."""
     if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -134,25 +138,11 @@ def assign_lead_to_current_user(
             detail=f"Lead {lead_id} not found",
         )
 
-    if (
-        current_user.role == "sales_rep"
-        and lead.assigned_to is not None
-        and lead.assigned_to != current_user.id
-    ):
-        occupied_by = (
-            lead.assignee.username
-            if lead.assignee is not None
-            else f"User #{lead.assigned_to}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Chat is currently engaged by {occupied_by}",
-        )
-
-    if current_user.id and current_user.id > 0:
+    if lead.assigned_to is None and current_user.id and current_user.id > 0:
         lead.assigned_to = current_user.id
-        if lead.lead_status == "unassigned":
-            lead.lead_status = "active"
+
+    if lead.assigned_to is not None:
+        lead.lead_status = "active"
 
     db.commit()
     db.refresh(lead)
@@ -171,10 +161,7 @@ def release_lead_engagement(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Release chat engagement so the lead becomes unoccupied.
-    Sales reps can only release chats engaged by themselves.
-    """
+    """Mark a chat as unoccupied while preserving original owner."""
     if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -194,8 +181,7 @@ def release_lead_engagement(
             detail="You can only release chats engaged by your account",
         )
 
-    if lead.assigned_to is not None:
-        lead.assigned_to = None
+    if lead.lead_status != "unassigned":
         lead.lead_status = "unassigned"
         db.commit()
         db.refresh(lead)
