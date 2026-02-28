@@ -23,16 +23,27 @@ class CustomLeadPaymentPayload(BaseModel):
 
 
 def _ensure_lead_payment_access(*, lead: Lead, current_user: User) -> None:
-    if current_user.role == "sales_rep" and lead.assigned_to != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Sales reps can only access payments for their assigned leads",
-        )
     if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to access lead payments",
         )
+
+
+def _lead_engagement_payload(lead: Lead) -> dict:
+    engaged_by_username = None
+    if lead.assigned_to is not None:
+        engaged_by_username = (
+            lead.assignee.username
+            if lead.assignee is not None
+            else f"User #{lead.assigned_to}"
+        )
+
+    return {
+        "engagedByUserId": lead.assigned_to,
+        "engagedByUsername": engaged_by_username,
+        "isEngaged": lead.assigned_to is not None,
+    }
 
 @router.get("/leads")
 def get_all_leads(
@@ -45,24 +56,19 @@ def get_all_leads(
     Fetch all leads for the CRM directory.
     Joins with the Contact table to get the Instagram ID and last message timestamp.
     """
-    # Start building the query, joining Lead with Contact to avoid N+1 query issues
-    query = db.query(Lead).options(joinedload(Lead.contact))
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view leads",
+        )
+
+    # Start building the query, joining Lead with Contact/User to avoid N+1 query issues
+    query = db.query(Lead).options(joinedload(Lead.contact), joinedload(Lead.assignee))
 
     normalized_status = status_filter.lower() if status_filter else None
     is_unassigned_filter = normalized_status == "unassigned"
 
-    if current_user.role == "sales_rep":
-        if is_unassigned_filter:
-            query = query.filter(Lead.assigned_to.is_(None))
-        else:
-            target_assignee = current_user.id if assigned_to is None else assigned_to
-            if target_assignee != current_user.id:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Sales reps can only view their own assigned chats",
-                )
-            query = query.filter(Lead.assigned_to == current_user.id)
-    elif assigned_to is not None:
+    if assigned_to is not None:
         query = query.filter(Lead.assigned_to == assigned_to)
 
     # Apply optional status filter
@@ -92,7 +98,8 @@ def get_all_leads(
             "status": lead.status,
             "email": lead.email or "",
             "phone": lead.phone or "",
-            "lastActive": last_active.isoformat() if last_active else None
+            "lastActive": last_active.isoformat() if last_active else None,
+            **_lead_engagement_payload(lead),
         })
 
     # Sort the results so the most recently active leads are at the top
@@ -111,19 +118,41 @@ def assign_lead_to_current_user(
     db: Session = Depends(get_db),
 ):
     """
-    Assign a lead to the current authenticated user.
-    Moves lead_status from 'unassigned' to 'active'.
+    Mark a chat as engaged by the current user.
+    Sales reps cannot engage a chat already engaged by another sales rep.
     """
-    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to engage chats",
+        )
+
+    lead = db.query(Lead).options(joinedload(Lead.assignee)).filter(Lead.id == lead_id).first()
     if not lead:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lead {lead_id} not found",
         )
 
-    lead.assigned_to = current_user.id
-    if lead.lead_status == "unassigned":
-        lead.lead_status = "active"
+    if (
+        current_user.role == "sales_rep"
+        and lead.assigned_to is not None
+        and lead.assigned_to != current_user.id
+    ):
+        occupied_by = (
+            lead.assignee.username
+            if lead.assignee is not None
+            else f"User #{lead.assigned_to}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Chat is currently engaged by {occupied_by}",
+        )
+
+    if current_user.id and current_user.id > 0:
+        lead.assigned_to = current_user.id
+        if lead.lead_status == "unassigned":
+            lead.lead_status = "active"
 
     db.commit()
     db.refresh(lead)
@@ -132,6 +161,50 @@ def assign_lead_to_current_user(
         "id": lead.id,
         "assigned_to": lead.assigned_to,
         "lead_status": lead.lead_status,
+        **_lead_engagement_payload(lead),
+    }
+
+
+@router.put("/leads/{lead_id}/release")
+def release_lead_engagement(
+    lead_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Release chat engagement so the lead becomes unoccupied.
+    Sales reps can only release chats engaged by themselves.
+    """
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to release chats",
+        )
+
+    lead = db.query(Lead).options(joinedload(Lead.assignee)).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    if current_user.role == "sales_rep" and lead.assigned_to not in {None, current_user.id}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only release chats engaged by your account",
+        )
+
+    if lead.assigned_to is not None:
+        lead.assigned_to = None
+        lead.lead_status = "unassigned"
+        db.commit()
+        db.refresh(lead)
+
+    return {
+        "id": lead.id,
+        "assigned_to": lead.assigned_to,
+        "lead_status": lead.lead_status,
+        **_lead_engagement_payload(lead),
     }
 
 
@@ -141,7 +214,7 @@ def get_lead_details(lead_id: int, db: Session = Depends(get_db)):
     Fetch specific lead details for the right-hand panel in the Chat View.
     Also checks if the LeadSubmitted CAPI event has been fired.
     """
-    lead = db.query(Lead).options(joinedload(Lead.contact)).filter(Lead.id == lead_id).first()
+    lead = db.query(Lead).options(joinedload(Lead.contact), joinedload(Lead.assignee)).filter(Lead.id == lead_id).first()
     
     if not lead:
         raise HTTPException(
@@ -165,7 +238,8 @@ def get_lead_details(lead_id: int, db: Session = Depends(get_db)):
         "email": lead.email or "",
         "phone": lead.phone or "",
         "metaEventFired": capi_synced,
-        "createdAt": lead.created_at.isoformat()
+        "createdAt": lead.created_at.isoformat(),
+        **_lead_engagement_payload(lead),
     }
 
 
@@ -250,6 +324,8 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
 @router.get("/dashboard/activity")
 def get_dashboard_activity(
     limit: int = Query(10, ge=1, le=50, description="Maximum activity items to return"),
+    page: int = Query(1, ge=1, le=50, description="Activity page number"),
+    include_meta: bool = Query(False, description="Include pagination metadata"),
     db: Session = Depends(get_db),
 ):
     """
@@ -257,12 +333,14 @@ def get_dashboard_activity(
     Sources: latest messages, lead submissions, paid invoices, and CAPI events.
     """
     activity_items: list[dict] = []
+    offset = (page - 1) * limit
+    source_limit = offset + limit + 1
 
     recent_messages = (
         db.query(Message)
         .options(joinedload(Message.contact))
         .order_by(Message.created_at.desc())
-        .limit(limit)
+        .limit(source_limit)
         .all()
     )
     for msg in recent_messages:
@@ -276,7 +354,7 @@ def get_dashboard_activity(
             }
         )
 
-    recent_leads = db.query(Lead).order_by(Lead.created_at.desc()).limit(limit).all()
+    recent_leads = db.query(Lead).order_by(Lead.created_at.desc()).limit(source_limit).all()
     for lead in recent_leads:
         activity_items.append(
             {
@@ -290,7 +368,7 @@ def get_dashboard_activity(
         db.query(Invoice)
         .filter(Invoice.status == "paid")
         .order_by(Invoice.paid_at.desc().nullslast(), Invoice.created_at.desc())
-        .limit(limit)
+        .limit(source_limit)
         .all()
     )
     for invoice in recent_paid_invoices:
@@ -308,7 +386,7 @@ def get_dashboard_activity(
         db.query(MetaConversionEvent)
         .filter(MetaConversionEvent.event_name == "LeadSubmitted")
         .order_by(MetaConversionEvent.created_at.desc())
-        .limit(limit)
+        .limit(source_limit)
         .all()
     )
     for event in recent_capi_events:
@@ -330,7 +408,19 @@ def get_dashboard_activity(
             return datetime.min.replace(tzinfo=timezone.utc)
 
     activity_items.sort(key=_timestamp_sort_key, reverse=True)
-    return activity_items[:limit]
+
+    paged_items = activity_items[offset: offset + limit]
+    has_next = len(activity_items) > offset + limit
+
+    if include_meta:
+        return {
+            "items": paged_items,
+            "page": page,
+            "limit": limit,
+            "hasNext": has_next,
+        }
+
+    return paged_items
 
 
 @router.post("/leads/{lead_id}/payments/custom")

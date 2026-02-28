@@ -43,7 +43,7 @@ def get_db() -> Generator:
 
 
 def _is_truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+    return (value or "").strip().lower() in {"1", "true", "yes", "on", "True", "TRUE"}
 
 
 def _is_postgres_url(url: str) -> bool:
