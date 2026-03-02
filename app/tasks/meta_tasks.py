@@ -1,11 +1,12 @@
 import os
 from typing import Any, Dict, Optional
+from datetime import datetime
 
 from celery import Task
 
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
-from app.db.models import PaymentEvent, WebhookEvent
+from app.db.models import ActivityLog, PaymentEvent, WebhookEvent
 from app.services.event_handlers import handle_event_received
 from app.services.post_leads_to_meta import post_meta_event_by_id
 from utils import append_chat_message, automation_mail
@@ -169,6 +170,52 @@ def post_meta_conversion_event(self, *, event_id: int) -> Dict[str, Any]:
             exc,
             "post_meta_conversion_event",
             {"event_id": int(event_id)},
+        )
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, base=BaseDBTask, name="tasks.persist_audit_log")
+def persist_audit_log(
+    self,
+    *,
+    action_type: str,
+    actor_user_id: int | None = None,
+    actor_username: str | None = None,
+    actor_role: str | None = None,
+    entity_type: str | None = None,
+    entity_id: str | None = None,
+    details: str | None = None,
+    payload: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        entry = ActivityLog(
+            action_type=action_type,
+            actor_user_id=actor_user_id,
+            actor_username=actor_username,
+            actor_role=actor_role,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            details=details,
+            payload=payload,
+            created_at=datetime.utcnow(),
+        )
+        db.add(entry)
+        db.commit()
+        return {
+            "status": "created",
+            "task": "persist_audit_log",
+            "audit_log_id": int(entry.id),
+            "action_type": action_type,
+        }
+    except Exception as exc:
+        db.rollback()
+        return _retry_or_finalize(
+            self,
+            exc,
+            "persist_audit_log",
+            {"action_type": action_type},
         )
     finally:
         db.close()

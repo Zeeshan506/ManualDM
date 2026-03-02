@@ -2,6 +2,7 @@ import os
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from celery import Celery
+from kombu import Queue
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,4 +45,18 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     task_always_eager=False,
     task_eager_propagates=False,
+    task_default_queue="events",
+    task_default_exchange="events",
+    task_default_routing_key="events",
+    task_queues=(
+        Queue("events"),
+        Queue("meta"),
+        Queue("audit"),
+    ),
+    task_routes={
+        "tasks.process_webhook_event": {"queue": "events"},
+        "tasks.send_automation_reply": {"queue": "events"},
+        "tasks.post_meta_conversion_event": {"queue": "meta"},
+        "tasks.persist_audit_log": {"queue": "audit"},
+    },
 )

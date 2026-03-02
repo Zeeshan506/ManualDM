@@ -1,42 +1,10 @@
 from typing import Any
 
-from fastapi import BackgroundTasks
-
-from app.core.database import SessionLocal
-from app.db.models import ActivityLog
-
-
-def _insert_activity_log(
-    *,
-    actor: str,
-    action: str,
-    details: str | None = None,
-    lead_id: int | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    db = SessionLocal()
-    try:
-        entry = ActivityLog(
-            action_type=action,
-            actor_user_id=(metadata or {}).get("actor_user_id"),
-            actor_username=(actor or "system").strip() or "system",
-            actor_role=(metadata or {}).get("actor_role"),
-            entity_type=(metadata or {}).get("entity_type") or ("lead" if lead_id is not None else None),
-            entity_id=(metadata or {}).get("entity_id") or (str(lead_id) if lead_id is not None else None),
-            details=details,
-            payload=metadata,
-        )
-        db.add(entry)
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        print(f"⚠️ Failed to persist activity log action={action}: {exc}")
-    finally:
-        db.close()
+from app.core.celery_app import celery_app
 
 
 def enqueue_activity_log(
-    background_tasks: BackgroundTasks,
+    _unused_background_tasks: Any = None,
     *,
     actor: str,
     action: str,
@@ -44,11 +12,21 @@ def enqueue_activity_log(
     lead_id: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    background_tasks.add_task(
-        _insert_activity_log,
-        actor=actor,
-        action=action,
-        details=details,
-        lead_id=lead_id,
-        metadata=metadata,
-    )
+    safe_actor = (actor or "system").strip() or "system"
+    safe_metadata = metadata or {}
+    try:
+        celery_app.send_task(
+            "tasks.persist_audit_log",
+            kwargs={
+                "action_type": action,
+                "actor_user_id": safe_metadata.get("actor_user_id"),
+                "actor_username": safe_actor,
+                "actor_role": safe_metadata.get("actor_role"),
+                "entity_type": safe_metadata.get("entity_type") or ("lead" if lead_id is not None else None),
+                "entity_id": safe_metadata.get("entity_id") or (str(lead_id) if lead_id is not None else None),
+                "details": details,
+                "payload": safe_metadata,
+            },
+        )
+    except Exception as exc:
+        print(f"⚠️ Failed to enqueue audit log action={action}: {exc}")
