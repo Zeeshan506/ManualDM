@@ -1,7 +1,8 @@
 import os
 import logging
 from typing import Any, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import or_
 
 from celery import Task
 
@@ -73,6 +74,11 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
             }
 
         if not isinstance(event.payload, dict):
+            event.processing_state = "failed"
+            event.enqueue_status = "failed"
+            event.last_error = "invalid_payload"
+            event.next_retry_at = datetime.utcnow() + timedelta(minutes=1)
+            db.commit()
             return {
                 "status": "skipped",
                 "task": "process_webhook_event",
@@ -80,7 +86,26 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
                 "reason": "invalid_payload",
             }
 
+        if event.processing_state == "processed" or event.processed:
+            return {
+                "status": "skipped",
+                "task": "process_webhook_event",
+                "event_id": int(event_id),
+                "reason": "already_processed",
+            }
+
+        event.processing_state = "processing"
+        event.processing_attempts = int(event.processing_attempts or 0) + 1
+        event.last_error = None
+        db.commit()
+
         summary = handle_event_received(event.payload, db)
+        event.processed = True
+        event.processing_state = "processed"
+        event.enqueue_status = "processed"
+        event.processed_at = datetime.utcnow()
+        event.next_retry_at = None
+        event.last_error = None
         db.commit()
 
         async_jobs = summary.get("async_jobs") or []
@@ -109,6 +134,18 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
         }
     except Exception as exc:
         db.rollback()
+        current_retry = int(getattr(self.request, "retries", 0))
+        retry_at = datetime.utcnow() + timedelta(seconds=min(300, 2 ** current_retry))
+        try:
+            failed_event = db.query(WebhookEvent).filter(WebhookEvent.id == int(event_id)).first()
+            if failed_event:
+                failed_event.processing_state = "failed"
+                failed_event.enqueue_status = "failed"
+                failed_event.last_error = str(exc)[:1000]
+                failed_event.next_retry_at = retry_at
+                db.commit()
+        except Exception:
+            db.rollback()
         log_event(
             logger,
             logging.ERROR,
@@ -204,6 +241,89 @@ def post_meta_conversion_event(self, *, event_id: int) -> Dict[str, Any]:
             exc,
             "post_meta_conversion_event",
             {"event_id": int(event_id)},
+        )
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, base=BaseDBTask, name="tasks.redrive_webhook_enqueue")
+def redrive_webhook_enqueue(self, *, batch_size: int = 200) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        candidates = (
+            db.query(WebhookEvent)
+            .filter(
+                WebhookEvent.event_type == "EVENT_RECEIVED",
+                WebhookEvent.processed.is_(False),
+                WebhookEvent.enqueue_status.in_(["pending", "failed"]),
+                or_(WebhookEvent.next_retry_at.is_(None), WebhookEvent.next_retry_at <= now),
+            )
+            .order_by(WebhookEvent.created_at.asc(), WebhookEvent.id.asc())
+            .limit(max(1, int(batch_size)))
+            .all()
+        )
+
+        enqueued = 0
+        failed = 0
+        for event in candidates:
+            attempt = int(event.enqueue_attempts or 0) + 1
+            try:
+                result = celery_app.send_task(
+                    "tasks.process_webhook_event",
+                    kwargs={"event_id": int(event.id)},
+                )
+                event.enqueue_status = "queued"
+                event.enqueue_attempts = attempt
+                event.queued_at = now
+                event.next_retry_at = None
+                event.last_error = None
+                enqueued += 1
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "webhook.redrive_enqueued",
+                    event_id=int(event.id),
+                    task_id=result.id,
+                    enqueue_attempt=attempt,
+                )
+            except Exception as exc:
+                backoff = min(300, 2 ** min(attempt, 8))
+                event.enqueue_status = "failed"
+                event.enqueue_attempts = attempt
+                event.next_retry_at = now + timedelta(seconds=backoff)
+                event.last_error = str(exc)[:1000]
+                failed += 1
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "webhook.redrive_enqueue_failed",
+                    event_id=int(event.id),
+                    enqueue_attempt=attempt,
+                    error=str(exc),
+                )
+
+        db.commit()
+        return {
+            "status": "completed",
+            "task": "redrive_webhook_enqueue",
+            "scanned": len(candidates),
+            "enqueued": enqueued,
+            "failed": failed,
+        }
+    except Exception as exc:
+        db.rollback()
+        log_event(
+            logger,
+            logging.ERROR,
+            "task.redrive_webhook_enqueue.error",
+            error=str(exc),
+        )
+        return _retry_or_finalize(
+            self,
+            exc,
+            "redrive_webhook_enqueue",
+            {"batch_size": int(batch_size)},
         )
     finally:
         db.close()

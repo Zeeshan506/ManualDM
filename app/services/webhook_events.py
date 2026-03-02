@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -6,8 +7,14 @@ from sqlalchemy.orm import Session
 from app.db.models import WebhookEvent
 
 
-def persist_webhook_event(raw_body_text: str, data: Any, db: Session) -> dict:
-    status_tag = "EVENT_RECEIVED" if isinstance(data, dict) and data.get("object") == "instagram" else "IGNORED"
+def _idempotency_key(*, source: str, external_event_id: str | None, raw_body_text: str) -> str:
+    if external_event_id:
+        return f"{source}:{external_event_id}"
+    body_hash = hashlib.sha256(raw_body_text.encode("utf-8")).hexdigest()
+    return f"{source}:hash:{body_hash}"
+
+
+def persist_webhook_event(raw_body_text: str, data: Any, status_tag: str, db: Session) -> dict:
 
     source = data.get("object") if isinstance(data, dict) else None
     event_type = status_tag
@@ -28,15 +35,51 @@ def persist_webhook_event(raw_body_text: str, data: Any, db: Session) -> dict:
     except Exception:
         external_event_id = None
 
+    source_value = source or "unknown"
+    idempotency_key = _idempotency_key(
+        source=source_value,
+        external_event_id=external_event_id,
+        raw_body_text=raw_body_text,
+    )
+
+    existing_event = db.query(WebhookEvent).filter(WebhookEvent.idempotency_key == idempotency_key).first()
+    if existing_event:
+        return {
+            "status_tag": existing_event.event_type or status_tag,
+            "event_id": existing_event.id,
+            "existing": True,
+            "enqueue_status": existing_event.enqueue_status,
+            "processing_state": existing_event.processing_state,
+        }
+
+    is_event_received = status_tag == "EVENT_RECEIVED"
+    processing_state = "received" if is_event_received else "ignored"
+    enqueue_status = "pending" if is_event_received else "skipped"
+
     event = WebhookEvent(
-        source=source or "unknown",
+        source=source_value,
         event_type=event_type,
         external_event_id=external_event_id,
+        idempotency_key=idempotency_key,
         payload=data if isinstance(data, (dict, list)) else None,
-        processed=(status_tag == "EVENT_RECEIVED"),
+        processed=not is_event_received,
+        processing_state=processing_state,
+        enqueue_status=enqueue_status,
+        enqueue_attempts=0,
+        processing_attempts=0,
+        queued_at=None,
+        processed_at=None,
+        next_retry_at=None,
+        last_error=None,
         created_at=datetime.utcnow(),
     )
 
     db.add(event)
     db.flush()
-    return {"status_tag": status_tag, "event_id": event.id, "existing": False}
+    return {
+        "status_tag": status_tag,
+        "event_id": event.id,
+        "existing": False,
+        "enqueue_status": event.enqueue_status,
+        "processing_state": event.processing_state,
+    }

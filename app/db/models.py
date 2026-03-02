@@ -27,12 +27,22 @@ class WebhookEvent(Base):
     source = Column(String, nullable=False)
     event_type = Column(String, nullable=True)
     external_event_id = Column(String, nullable=True, index=True)
+    idempotency_key = Column(String, nullable=False, unique=True, index=True)
     payload = Column(JSON, nullable=True)
     processed = Column(Boolean, default=False, nullable=False)
+    processing_state = Column(String, nullable=False, default="received", index=True)
+    enqueue_status = Column(String, nullable=False, default="pending", index=True)
+    enqueue_attempts = Column(Integer, nullable=False, default=0)
+    processing_attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True)
+    queued_at = Column(DateTime(timezone=True), nullable=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
         Index("ix_webhook_source_external", "source", "external_event_id"),
+        Index("ix_webhook_enqueue_next_retry", "enqueue_status", "next_retry_at"),
     )
 
 

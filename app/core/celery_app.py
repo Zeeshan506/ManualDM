@@ -55,8 +55,16 @@ celery_app.conf.update(
     ),
     task_routes={
         "tasks.process_webhook_event": {"queue": "events"},
+        "tasks.redrive_webhook_enqueue": {"queue": "events"},
         "tasks.send_automation_reply": {"queue": "events"},
         "tasks.post_meta_conversion_event": {"queue": "meta"},
         "tasks.persist_audit_log": {"queue": "audit"},
+    },
+    beat_schedule={
+        "redrive-webhook-enqueue": {
+            "task": "tasks.redrive_webhook_enqueue",
+            "schedule": 30.0,
+            "kwargs": {"batch_size": 200},
+        }
     },
 )

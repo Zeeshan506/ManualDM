@@ -4,7 +4,7 @@ import re
 import logging
 import time
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.services.webhook_events import persist_webhook_event
 import uvicorn
 from anyio import to_thread
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal, get_db, init_db
 from app.core.logging import configure_logging, get_logger, log_event, reset_request_id, set_request_id
-from app.db.models import Lead
+from app.db.models import Lead, WebhookEvent
 from app.services.meta_conversion_events import (
     persist_custom_event_for_lead,
     persist_leadsubmitted_event_for_lead,
@@ -93,26 +93,65 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
 
 
 def _enqueue_webhook_processing(event_id: int) -> None:
-    result = celery_app.send_task(
-        "tasks.process_webhook_event",
-        kwargs={"event_id": int(event_id)},
-    )
-    log_event(
-        logger,
-        logging.INFO,
-        "webhook.enqueued",
-        event_id=int(event_id),
-        task_id=result.id,
-        task_name="tasks.process_webhook_event",
-    )
-
-
-def _persist_webhook_event_threadsafe(raw_body_text: str, data: dict | None) -> tuple[str, int | None]:
     db = SessionLocal()
     try:
-        persisted = persist_webhook_event(raw_body_text, data, db)
+        event = db.query(WebhookEvent).filter(WebhookEvent.id == int(event_id)).first()
+        if not event:
+            return
+        if event.event_type != "EVENT_RECEIVED":
+            return
+        if event.processing_state in {"processing", "processed"}:
+            return
+        if event.enqueue_status == "queued":
+            return
+
+        next_attempt = int(event.enqueue_attempts or 0) + 1
+
+        result = celery_app.send_task(
+            "tasks.process_webhook_event",
+            kwargs={"event_id": int(event_id)},
+        )
+
+        event.enqueue_status = "queued"
+        event.queued_at = datetime.utcnow()
+        event.enqueue_attempts = next_attempt
+        event.next_retry_at = None
+        event.last_error = None
         db.commit()
-        return persisted.get("status_tag"), persisted.get("event_id")
+
+        log_event(
+            logger,
+            logging.INFO,
+            "webhook.enqueued",
+            event_id=int(event_id),
+            task_id=result.id,
+            task_name="tasks.process_webhook_event",
+            enqueue_attempt=next_attempt,
+        )
+    except Exception as exc:
+        db.rollback()
+        retry_at = datetime.utcnow() + timedelta(seconds=30)
+        try:
+            event = db.query(WebhookEvent).filter(WebhookEvent.id == int(event_id)).first()
+            if event:
+                event.enqueue_status = "failed"
+                event.next_retry_at = retry_at
+                event.enqueue_attempts = int(event.enqueue_attempts or 0) + 1
+                event.last_error = str(exc)[:1000]
+                db.commit()
+        except Exception:
+            db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _persist_webhook_event_threadsafe(raw_body_text: str, data: dict | None, status_tag: str) -> dict:
+    db = SessionLocal()
+    try:
+        persisted = persist_webhook_event(raw_body_text, data, status_tag, db)
+        db.commit()
+        return persisted
     except Exception:
         db.rollback()
         log_event(
@@ -241,21 +280,29 @@ async def receive_message(request: Request):
         source=(data.get("object") if isinstance(data, dict) else None),
     )
 
-    status_tag, persisted_event_id = await to_thread.run_sync(
+    persisted = await to_thread.run_sync(
         _persist_webhook_event_threadsafe,
         raw_body_text,
         data if isinstance(data, dict) else None,
+        status_tag,
     )
+
+    persisted_status_tag = persisted.get("status_tag")
+    persisted_event_id = persisted.get("event_id")
+    existing_event = bool(persisted.get("existing"))
 
     log_event(
         logger,
         logging.INFO,
         "webhook.persisted",
-        status_tag=status_tag,
+        status_tag=persisted_status_tag,
         persisted_event_id=persisted_event_id,
+        existing=existing_event,
+        enqueue_status=persisted.get("enqueue_status"),
+        processing_state=persisted.get("processing_state"),
     )
 
-    if status_tag == "EVENT_RECEIVED" and isinstance(data, dict) and persisted_event_id:
+    if persisted_status_tag == "EVENT_RECEIVED" and persisted_event_id:
         try:
             await to_thread.run_sync(_enqueue_webhook_processing, int(persisted_event_id))
         except Exception as exc:
@@ -268,9 +315,9 @@ async def receive_message(request: Request):
                 error=str(exc),
             )
 
-    if status_tag == "BAD_JSON":
+    if persisted_status_tag == "BAD_JSON":
         return {"status": "BAD_JSON"}
-    if status_tag == "EVENT_RECEIVED":
+    if persisted_status_tag == "EVENT_RECEIVED":
         return {"status": "EVENT_RECEIVED"}
     return {"status": "IGNORED"}
 
