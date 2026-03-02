@@ -4,12 +4,13 @@ import re
 from datetime import datetime
 from app.services.webhook_events import persist_webhook_event
 import uvicorn
+from anyio import to_thread
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.celery_app import celery_app
-from app.core.database import get_db, init_db
+from app.core.database import SessionLocal, get_db, init_db
 from app.db.models import Lead
 from app.services.meta_conversion_events import (
     persist_custom_event_for_lead,
@@ -54,6 +55,19 @@ def _enqueue_webhook_processing(event_id: int) -> None:
         kwargs={"event_id": int(event_id)},
     )
     print(f"Enqueued Celery task tasks.process_webhook_event id={result.id} event_id={event_id}")
+
+
+def _persist_webhook_event_threadsafe(raw_body_text: str, data: dict | None) -> tuple[str, int | None]:
+    db = SessionLocal()
+    try:
+        persisted = persist_webhook_event(raw_body_text, data, db)
+        db.commit()
+        return persisted.get("status_tag"), persisted.get("event_id")
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 class LeadContactUpdatePayload(BaseModel):
@@ -114,7 +128,7 @@ init_db()
 
 
 @app.get("/webhook")
-async def verify_webhook(request: Request):
+def verify_webhook(request: Request):
     """
     Handles the Webhook Verification Challenge from Meta.
     """
@@ -140,7 +154,7 @@ async def verify_webhook(request: Request):
 
 
 @app.post("/webhook")
-async def receive_message(request: Request, db: Session = Depends(get_db)):
+async def receive_message(request: Request):
 
     raw_body_bytes = await request.body()
     raw_body_text = raw_body_bytes.decode("utf-8", errors="replace")
@@ -162,20 +176,15 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
         print(raw_body_text)
     print("==============================================\n")
 
-    persisted_event_id: int | None = None
-    try:
-        persisted = persist_webhook_event(raw_body_text, data, db)
-        status_tag = persisted.get("status_tag")
-        persisted_event_id = persisted.get("event_id")
-
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    status_tag, persisted_event_id = await to_thread.run_sync(
+        _persist_webhook_event_threadsafe,
+        raw_body_text,
+        data if isinstance(data, dict) else None,
+    )
 
     if status_tag == "EVENT_RECEIVED" and isinstance(data, dict) and persisted_event_id:
         try:
-            _enqueue_webhook_processing(int(persisted_event_id))
+            await to_thread.run_sync(_enqueue_webhook_processing, int(persisted_event_id))
         except Exception as exc:
             # Do not fail webhook response if queueing fails.
             print(f"⚠️ Failed to enqueue process_webhook_event for event_id={persisted_event_id}: {exc}")
@@ -188,7 +197,7 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/leads/{lead_id}/contact-details")
-async def update_lead_contact_details(
+def update_lead_contact_details(
     lead_id: int,
     body: LeadContactUpdatePayload,
     background_tasks: BackgroundTasks,
@@ -290,7 +299,7 @@ async def update_lead_contact_details(
 
 
 @app.post("/leads/{lead_id}/mock-purchase")
-async def create_mock_purchase_event(
+def create_mock_purchase_event(
     lead_id: int,
     body: MockPurchasePayload,
     background_tasks: BackgroundTasks,
@@ -364,7 +373,7 @@ async def create_mock_purchase_event(
 
 
 @app.post("/leads/{lead_id}/meta-events")
-async def create_lead_meta_event(
+def create_lead_meta_event(
     lead_id: int,
     body: LeadMetaEventPayload,
     background_tasks: BackgroundTasks,
