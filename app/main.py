@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from app.services.webhook_events import persist_webhook_event
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.services.meta_conversion_events import (
     persist_leadsubmitted_event_for_lead,
     persist_purchase_event_for_lead,
 )
+from app.services.activity_logs import enqueue_activity_log
 from app.api.routes.api import router as api_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.admin import router as admin_router
@@ -190,6 +191,7 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
 async def update_lead_contact_details(
     lead_id: int,
     body: LeadContactUpdatePayload,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     if body.name is None and body.email is None and body.phone is None:
@@ -262,6 +264,20 @@ async def update_lead_contact_details(
         db.rollback()
         raise
 
+    enqueue_activity_log(
+        background_tasks,
+        actor="system",
+        action="UPDATE_LEAD_CONTACT",
+        details=f"Updated contact details for lead #{lead.id}",
+        lead_id=lead.id,
+        metadata={
+            "name_updated": body.name is not None,
+            "email_updated": body.email is not None,
+            "phone_updated": body.phone is not None,
+            "leadsubmitted_event_id": leadsubmitted_event_id,
+        },
+    )
+
     return {
         "status": "updated",
         "lead_id": lead.id,
@@ -277,8 +293,11 @@ async def update_lead_contact_details(
 async def create_mock_purchase_event(
     lead_id: int,
     body: MockPurchasePayload,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
+
+
     if body.value <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -325,6 +344,15 @@ async def create_mock_purchase_event(
         )
         task_id = task.id
 
+    enqueue_activity_log(
+        background_tasks,
+        actor="system",
+        action="CREATE_MOCK_PURCHASE_EVENT",
+        details=f"Created mock purchase for lead #{lead_id}",
+        lead_id=lead_id,
+        metadata={"meta_event_id": int(event.id), "value": body.value, "currency": currency, "queued_for_meta": bool(body.send_now)},
+    )
+
     return {
         "status": "created",
         "lead_id": lead_id,
@@ -339,6 +367,7 @@ async def create_mock_purchase_event(
 async def create_lead_meta_event(
     lead_id: int,
     body: LeadMetaEventPayload,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     try:
@@ -369,6 +398,15 @@ async def create_lead_meta_event(
             kwargs={"event_id": int(event.id)},
         )
         task_id = task.id
+
+    enqueue_activity_log(
+        background_tasks,
+        actor="system",
+        action="CREATE_META_EVENT",
+        details=f"Created meta event {event.event_name} for lead #{lead_id}",
+        lead_id=lead_id,
+        metadata={"meta_event_id": int(event.id), "event_name": event.event_name, "queued_for_meta": bool(body.send_now)},
+    )
 
     return {
         "status": "created",

@@ -1,12 +1,13 @@
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from app.core.database import get_db
 from app.db.models import User
 from app.core.security import create_access_token, verify_password
+from app.services.activity_logs import enqueue_activity_log
 
 load_dotenv()
 router = APIRouter(prefix="/api", tags=["Authentication"])
@@ -30,7 +31,7 @@ class PasswordResetRequestBody(BaseModel):
 
 
 @router.post("/login")
-def login(body: LoginRequest, db: Session = Depends(get_db)):
+def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     normalized_username = body.username.strip()
     if not normalized_username:
         raise HTTPException(
@@ -46,6 +47,13 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         # and body.password == SUDO_ADMIN_BACKUP_TOKEN
     ):
         token = create_access_token(subject=SUDO_ADMIN_BACKUP, role="sudo_admin")
+        enqueue_activity_log(
+            background_tasks,
+            actor=normalized_username,
+            action="LOGIN_SUCCESS",
+            details="Sudo backup login successful",
+            metadata={"role": "sudo_admin", "source": "backup"},
+        )
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -58,18 +66,37 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.username == normalized_username).first()
 
         if not user or not verify_password(body.password, user.hashed_password):
+            enqueue_activity_log(
+                background_tasks,
+                actor=normalized_username,
+                action="LOGIN_FAILED",
+                details="Invalid username or password",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid username or password",
             )
 
         if not user.is_active:
+            enqueue_activity_log(
+                background_tasks,
+                actor=normalized_username,
+                action="LOGIN_BLOCKED",
+                details="Login blocked because user is inactive",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="User account is inactive",
             )
 
         token = create_access_token(subject=user.username, role="sudo_admin")
+        enqueue_activity_log(
+            background_tasks,
+            actor=user.username,
+            action="LOGIN_SUCCESS",
+            details="Sudo user login successful",
+            metadata={"user_id": user.id, "role": "sudo_admin", "source": "sudo_user"},
+        )
         return {
             "access_token": token,
             "token_type": "bearer",
@@ -81,18 +108,39 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == normalized_username).first()
 
     if not user or not verify_password(body.password, user.hashed_password):
+        enqueue_activity_log(
+            background_tasks,
+            actor=normalized_username,
+            action="LOGIN_FAILED",
+            details="Invalid username or password",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
 
     if not user.is_active:
+        enqueue_activity_log(
+            background_tasks,
+            actor=normalized_username,
+            action="LOGIN_BLOCKED",
+            details="Login blocked because user is inactive",
+            metadata={"user_id": user.id},
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is inactive",
         )
 
     token = create_access_token(subject=user.username, role=user.role)
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=user.username,
+        action="LOGIN_SUCCESS",
+        details="Login successful",
+        metadata={"user_id": user.id, "role": user.role},
+    )
 
     return {
         "access_token": token,
@@ -104,10 +152,21 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/password-reset-request")
-def password_reset_request(body: PasswordResetRequestBody, db: Session = Depends(get_db)):
+def password_reset_request(
+    body: PasswordResetRequestBody,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     user = db.query(User).filter(User.username == body.username).first()
 
     if user and user.role == "sales_rep":
+        enqueue_activity_log(
+            background_tasks,
+            actor=user.username,
+            action="PASSWORD_RESET_REQUEST",
+            details="Password reset requested by sales rep",
+            metadata={"user_id": user.id, "role": user.role},
+        )
         print(
             f"MANAGER_NOTIFICATION: Password reset requested by sales rep username={user.username} user_id={user.id}"
         )

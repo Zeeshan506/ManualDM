@@ -1,13 +1,16 @@
 from typing import Annotated, Literal
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import require_admin, require_sudo_admin, get_current_user
-from app.db.models import User
+from app.db.models import ActivityLog, Invoice, Lead, User
 from app.core.security import hash_password
+from app.services.activity_logs import enqueue_activity_log
 
 router = APIRouter(prefix="/api/sudo", tags=["Admin Management"])
 
@@ -37,6 +40,7 @@ class UpdateStatusRequest(BaseModel):
 @router.post("/users")
 def create_user(
     body: CreateUserRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Session = Depends(get_db),
 ):
@@ -79,6 +83,14 @@ def create_user(
     db.commit()
     db.refresh(new_user)
 
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="ADD_USER",
+        details=f"Created user {new_user.username} with role {new_user.role}",
+        metadata={"target_user_id": new_user.id, "target_role": new_user.role},
+    )
+
     return {
         "id": new_user.id,
         "username": new_user.username,
@@ -119,6 +131,7 @@ def list_users(
 def update_user_role(
     user_id: int,
     body: UpdateRoleRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(require_sudo_admin)],
     db: Session = Depends(get_db),
 ):
@@ -140,9 +153,18 @@ def update_user_role(
             detail="Cannot change the role of another sudo admin",
         )
 
+    previous_role = target_user.role
     target_user.role = body.role
     db.commit()
     db.refresh(target_user)
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="UPDATE_ROLE",
+        details=f"Updated role for {target_user.username} from {previous_role} to {target_user.role}",
+        metadata={"target_user_id": target_user.id, "from_role": previous_role, "to_role": target_user.role},
+    )
 
     return {
         "id": target_user.id,
@@ -156,6 +178,7 @@ def update_user_role(
 def update_user_name(
     user_id: int,
     body: UpdateNameRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(require_admin)],
     db: Session = Depends(get_db),
 ):
@@ -185,9 +208,18 @@ def update_user_name(
             detail="Cannot update another sudo admin's name",
         )
 
+    previous_name = target_user.name
     target_user.name = body.name
     db.commit()
     db.refresh(target_user)
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="UPDATE_NAME",
+        details=f"Updated name for {target_user.username}",
+        metadata={"target_user_id": target_user.id, "from_name": previous_name, "to_name": target_user.name},
+    )
 
     return {
         "id": target_user.id,
@@ -201,6 +233,7 @@ def update_user_name(
 def update_user_password(
     user_id: int,
     body: UpdatePasswordRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(require_admin)],
     db: Session = Depends(get_db),
 ):
@@ -234,6 +267,14 @@ def update_user_password(
     db.commit()
     db.refresh(target_user)
 
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="UPDATE_PASSWORD",
+        details=f"Updated password for {target_user.username}",
+        metadata={"target_user_id": target_user.id},
+    )
+
     return {
         "id": target_user.id,
         "username": target_user.username,
@@ -247,6 +288,7 @@ def update_user_password(
 def update_user_status(
     user_id: int,
     body: UpdateStatusRequest,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(require_admin)],
     db: Session = Depends(get_db),
 ):
@@ -276,9 +318,18 @@ def update_user_status(
             detail="Cannot update another sudo admin's status",
         )
 
+    previous_status = target_user.is_active
     target_user.is_active = body.is_active
     db.commit()
     db.refresh(target_user)
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="UPDATE_STATUS",
+        details=f"Updated status for {target_user.username} to {'active' if target_user.is_active else 'inactive'}",
+        metadata={"target_user_id": target_user.id, "from_status": previous_status, "to_status": target_user.is_active},
+    )
 
     return {
         "id": target_user.id,
@@ -291,6 +342,7 @@ def update_user_status(
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
     user_id: int,
+    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(require_admin)],
     db: Session = Depends(get_db),
 ):
@@ -328,5 +380,136 @@ def delete_user(
             detail="Cannot delete another sudo admin account",
         )
 
+    deleted_user_id = target_user.id
+    deleted_username = target_user.username
+    deleted_role = target_user.role
     db.delete(target_user)
     db.commit()
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="DELETE_USER",
+        details=f"Deleted user {deleted_username} ({deleted_role})",
+        metadata={"target_user_id": deleted_user_id, "target_role": deleted_role},
+    )
+
+
+@router.get("/team-activity/logs")
+def get_team_activity_logs(
+    current_user: Annotated[User, Depends(require_admin)],
+    limit: int = Query(50, ge=1, le=200),
+    page: int = Query(1, ge=1),
+    db: Session = Depends(get_db),
+):
+    query = db.query(ActivityLog).order_by(ActivityLog.created_at.desc(), ActivityLog.id.desc())
+    total = query.count()
+
+    offset = (page - 1) * limit
+    rows = query.offset(offset).limit(limit).all()
+
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "timestamp": row.created_at.isoformat() if row.created_at else None,
+                "actor": row.actor_username or "system",
+                "action": row.action_type,
+                "details": row.details,
+            }
+            for row in rows
+        ],
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "hasNext": offset + len(rows) < total,
+    }
+
+
+@router.get("/team-activity/performance")
+def get_team_activity_performance(
+    current_user: Annotated[User, Depends(require_admin)],
+    db: Session = Depends(get_db),
+):
+    sales_reps = (
+        db.query(User)
+        .filter(User.role == "sales_rep")
+        .order_by(User.id.asc())
+        .all()
+    )
+
+    active_chats_rows = (
+        db.query(Lead.assigned_to, func.count(Lead.id))
+        .filter(
+            Lead.assigned_to.isnot(None),
+            Lead.lead_status == "active",
+        )
+        .group_by(Lead.assigned_to)
+        .all()
+    )
+    active_chats_by_user = {int(user_id): int(count) for user_id, count in active_chats_rows if user_id is not None}
+
+    converted_rows = (
+        db.query(Lead.assigned_to, func.count(Lead.id))
+        .filter(
+            Lead.assigned_to.isnot(None),
+            Lead.status == "paid",
+        )
+        .group_by(Lead.assigned_to)
+        .all()
+    )
+    converted_by_user = {int(user_id): int(count) for user_id, count in converted_rows if user_id is not None}
+
+    revenue_rows = (
+        db.query(Lead.assigned_to, func.coalesce(func.sum(Invoice.amount), 0))
+        .join(Invoice, Invoice.lead_id == Lead.id)
+        .filter(
+            Lead.assigned_to.isnot(None),
+            Invoice.status == "paid",
+        )
+        .group_by(Lead.assigned_to)
+        .all()
+    )
+    revenue_by_user = {int(user_id): float(amount or 0) for user_id, amount in revenue_rows if user_id is not None}
+
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+    active_actor_rows = (
+        db.query(ActivityLog.actor_username)
+        .filter(
+            ActivityLog.created_at >= recent_cutoff,
+            ActivityLog.actor_username.isnot(None),
+        )
+        .distinct()
+        .all()
+    )
+    recent_active_usernames = {row[0] for row in active_actor_rows if row[0]}
+
+    items = []
+    for rep in sales_reps:
+        display_name = (rep.name or rep.username or "").strip() or rep.username
+        role_label = rep.role.replace("_", " ").title()
+        is_online = rep.is_active and rep.username in recent_active_usernames
+
+        items.append(
+            {
+                "id": rep.id,
+                "name": display_name,
+                "role": role_label,
+                "activeChats": active_chats_by_user.get(rep.id, 0),
+                "converted": converted_by_user.get(rep.id, 0),
+                "revenue": revenue_by_user.get(rep.id, 0.0),
+                "status": "Online" if is_online else "Offline",
+            }
+        )
+
+    items.sort(
+        key=lambda row: (
+            row["status"] == "Online",
+            row["activeChats"],
+            row["converted"],
+            row["revenue"],
+        ),
+        reverse=True,
+    )
+
+    return items

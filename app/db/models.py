@@ -203,3 +203,19 @@ class MetaConversionEvent(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     lead = relationship("Lead", backref="meta_conversion_events")
+
+
+class ActivityLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True)
+
+    action_type = Column(String, nullable=False, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    actor_username = Column(String, nullable=True, index=True)
+    actor_role = Column(String, nullable=True, index=True)
+    entity_type = Column(String, nullable=True, index=True)
+    entity_id = Column(String, nullable=True, index=True)
+    details = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)

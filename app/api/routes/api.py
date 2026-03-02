@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, Query, status, APIRouter
+from fastapi import BackgroundTasks, Depends, HTTPException, Query, status, APIRouter
 from pydantic import BaseModel
 from sqlalchemy.orm import joinedload, Session
 from app.core.database import get_db
@@ -12,6 +12,7 @@ from app.core.dependencies import get_current_user
 from app.db.models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
 from app.db.models import PaymentEvent
 from app.services.meta_conversion_events import persist_purchase_event_for_lead
+from app.services.activity_logs import enqueue_activity_log
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
 
@@ -121,6 +122,7 @@ def get_all_leads(
 @router.put("/leads/{lead_id}/assign")
 def assign_lead_to_current_user(
     lead_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -147,6 +149,15 @@ def assign_lead_to_current_user(
     db.commit()
     db.refresh(lead)
 
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="CLAIM_CHAT",
+        details=f"Lead #{lead.id} claimed",
+        lead_id=lead.id,
+        metadata={"assigned_to": lead.assigned_to, "lead_status": lead.lead_status},
+    )
+
     return {
         "id": lead.id,
         "assigned_to": lead.assigned_to,
@@ -158,6 +169,7 @@ def assign_lead_to_current_user(
 @router.put("/leads/{lead_id}/release")
 def release_lead_engagement(
     lead_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -185,6 +197,15 @@ def release_lead_engagement(
         lead.lead_status = "unassigned"
         db.commit()
         db.refresh(lead)
+
+        enqueue_activity_log(
+            background_tasks,
+            actor=current_user.username,
+            action="CLOSE_CHAT",
+            details=f"Lead #{lead.id} released",
+            lead_id=lead.id,
+            metadata={"assigned_to": lead.assigned_to, "lead_status": lead.lead_status},
+        )
 
     return {
         "id": lead.id,
@@ -413,6 +434,7 @@ def get_dashboard_activity(
 def create_custom_lead_payment(
     lead_id: int,
     body: CustomLeadPaymentPayload,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -518,6 +540,20 @@ def create_custom_lead_payment(
             kwargs={"event_id": int(meta_event.id)},
         )
         task_id = task.id
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="CREATE_PAYMENT",
+        details=f"Created custom payment for lead #{lead.id} amount={float(normalized_amount):.2f} {currency}",
+        lead_id=lead.id,
+        metadata={
+            "invoice_id": invoice.id,
+            "payment_event_id": payment_event.id,
+            "meta_event_id": int(meta_event.id),
+            "queued_for_meta": bool(body.send_now),
+        },
+    )
 
     return {
         "status": "created",
