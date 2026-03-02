@@ -1,6 +1,11 @@
 from typing import Any
+import logging
 
 from app.core.celery_app import celery_app
+from app.core.logging import get_logger, log_event
+
+
+logger = get_logger(__name__)
 
 
 def enqueue_activity_log(
@@ -29,4 +34,10 @@ def enqueue_activity_log(
             },
         )
     except Exception as exc:
-        print(f"⚠️ Failed to enqueue audit log action={action}: {exc}")
+        log_event(
+            logger,
+            logging.WARNING,
+            "audit.enqueue_failed",
+            action=action,
+            error=str(exc),
+        )

@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Any, Dict, Optional
 from datetime import datetime
 
@@ -6,6 +7,7 @@ from celery import Task
 
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
+from app.core.logging import get_logger, log_event
 from app.db.models import ActivityLog, PaymentEvent, WebhookEvent
 from app.services.event_handlers import handle_event_received
 from app.services.post_leads_to_meta import post_meta_event_by_id
@@ -14,6 +16,9 @@ from utils import append_chat_message, automation_mail
 
 class BaseDBTask(Task):
     abstract = True
+
+
+logger = get_logger(__name__)
 
 
 def _repeat_count(task_name: str, default: int = 3) -> int:
@@ -36,7 +41,15 @@ def _retry_or_finalize(task: Task, exc: Exception, task_name: str, details: Dict
         countdown = min(60, 2 ** current_retry)
         raise task.retry(exc=exc, countdown=countdown, max_retries=max_retries)
 
-    print(f"❌ {task_name} failed after retries. details={details} error={exc}")
+    log_event(
+        logger,
+        logging.ERROR,
+        "task.failed_after_retries",
+        task_name=task_name,
+        retries=current_retry,
+        details=details,
+        error=str(exc),
+    )
     return {
         "status": "failed",
         "task": task_name,
@@ -96,6 +109,13 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
         }
     except Exception as exc:
         db.rollback()
+        log_event(
+            logger,
+            logging.ERROR,
+            "task.process_webhook_event.error",
+            event_id=int(event_id),
+            error=str(exc),
+        )
         return _retry_or_finalize(
             self,
             exc,
@@ -132,6 +152,13 @@ def send_automation_reply(self, *, igsid: str, message_text: Optional[str] = Non
         }
     except Exception as exc:
         db.rollback()
+        log_event(
+            logger,
+            logging.ERROR,
+            "task.send_automation_reply.error",
+            igsid=str(igsid),
+            error=str(exc),
+        )
         return _retry_or_finalize(
             self,
             exc,
@@ -165,6 +192,13 @@ def post_meta_conversion_event(self, *, event_id: int) -> Dict[str, Any]:
             "result": result,
         }
     except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "task.post_meta_conversion_event.error",
+            event_id=int(event_id),
+            error=str(exc),
+        )
         return _retry_or_finalize(
             self,
             exc,
@@ -211,6 +245,13 @@ def persist_audit_log(
         }
     except Exception as exc:
         db.rollback()
+        log_event(
+            logger,
+            logging.ERROR,
+            "task.persist_audit_log.error",
+            action_type=action_type,
+            error=str(exc),
+        )
         return _retry_or_finalize(
             self,
             exc,

@@ -1,9 +1,11 @@
 import os
+import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
+from app.core.logging import get_logger, log_event
 from app.core.database import get_db
 from app.db.models import User
 from app.core.security import create_access_token, verify_password
@@ -20,6 +22,7 @@ os.getenv("SUDO_ADMIN_BACKUP_TOKEN")
 )
 SUDO_USER_ID = os.getenv("SUDO_USER_ID")
 SUDO_USER_TOKEN = os.getenv("SUDO_USER_TOKEN")
+logger = get_logger(__name__)
 
 class LoginRequest(BaseModel):
     username: str
@@ -34,6 +37,7 @@ class PasswordResetRequestBody(BaseModel):
 def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     normalized_username = body.username.strip()
     if not normalized_username:
+        log_event(logger, logging.WARNING, "auth.login_bad_request", reason="empty_username")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username is required",
@@ -47,6 +51,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
         # and body.password == SUDO_ADMIN_BACKUP_TOKEN
     ):
         token = create_access_token(subject=SUDO_ADMIN_BACKUP, role="sudo_admin")
+        log_event(logger, logging.INFO, "auth.login_success", username=normalized_username, role="sudo_admin", source="backup")
         enqueue_activity_log(
             background_tasks,
             actor=normalized_username,
@@ -66,6 +71,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
         user = db.query(User).filter(User.username == normalized_username).first()
 
         if not user or not verify_password(body.password, user.hashed_password):
+            log_event(logger, logging.WARNING, "auth.login_failed", username=normalized_username, source="sudo_user")
             enqueue_activity_log(
                 background_tasks,
                 actor=normalized_username,
@@ -78,6 +84,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
             )
 
         if not user.is_active:
+            log_event(logger, logging.WARNING, "auth.login_blocked", username=normalized_username, source="sudo_user", reason="inactive")
             enqueue_activity_log(
                 background_tasks,
                 actor=normalized_username,
@@ -90,6 +97,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
             )
 
         token = create_access_token(subject=user.username, role="sudo_admin")
+        log_event(logger, logging.INFO, "auth.login_success", username=user.username, role="sudo_admin", source="sudo_user")
         enqueue_activity_log(
             background_tasks,
             actor=user.username,
@@ -108,6 +116,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
     user = db.query(User).filter(User.username == normalized_username).first()
 
     if not user or not verify_password(body.password, user.hashed_password):
+        log_event(logger, logging.WARNING, "auth.login_failed", username=normalized_username, source="standard")
         enqueue_activity_log(
             background_tasks,
             actor=normalized_username,
@@ -120,6 +129,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
         )
 
     if not user.is_active:
+        log_event(logger, logging.WARNING, "auth.login_blocked", username=normalized_username, source="standard", reason="inactive")
         enqueue_activity_log(
             background_tasks,
             actor=normalized_username,
@@ -133,6 +143,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
         )
 
     token = create_access_token(subject=user.username, role=user.role)
+    log_event(logger, logging.INFO, "auth.login_success", username=user.username, role=user.role, source="standard")
 
     enqueue_activity_log(
         background_tasks,
@@ -160,6 +171,7 @@ def password_reset_request(
     user = db.query(User).filter(User.username == body.username).first()
 
     if user and user.role == "sales_rep":
+        log_event(logger, logging.INFO, "auth.password_reset_requested", username=user.username, user_id=user.id)
         enqueue_activity_log(
             background_tasks,
             actor=user.username,
@@ -167,8 +179,13 @@ def password_reset_request(
             details="Password reset requested by sales rep",
             metadata={"user_id": user.id, "role": user.role},
         )
-        print(
-            f"MANAGER_NOTIFICATION: Password reset requested by sales rep username={user.username} user_id={user.id}"
+        log_event(
+            logger,
+            logging.INFO,
+            "auth.manager_notification",
+            username=user.username,
+            user_id=user.id,
+            message="Password reset requested by sales rep",
         )
 
     return {

@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import logging
+import time
+from uuid import uuid4
 from datetime import datetime
 from app.services.webhook_events import persist_webhook_event
 import uvicorn
@@ -11,6 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal, get_db, init_db
+from app.core.logging import configure_logging, get_logger, log_event, reset_request_id, set_request_id
 from app.db.models import Lead
 from app.services.meta_conversion_events import (
     persist_custom_event_for_lead,
@@ -22,6 +26,10 @@ from app.api.routes.api import router as api_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.users import router as users_router
+
+
+configure_logging()
+logger = get_logger(__name__)
 
 
 app = FastAPI()
@@ -45,6 +53,41 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(admin_router)
 
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    token = set_request_id(request_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        log_event(
+            logger,
+            logging.ERROR,
+            "request.unhandled_exception",
+            method=request.method,
+            path=request.url.path,
+            duration_ms=duration_ms,
+        )
+        reset_request_id(token)
+        raise
+
+    duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    response.headers["x-request-id"] = request_id
+    log_event(
+        logger,
+        logging.INFO,
+        "request.completed",
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+    )
+    reset_request_id(token)
+    return response
+
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
 
@@ -54,7 +97,14 @@ def _enqueue_webhook_processing(event_id: int) -> None:
         "tasks.process_webhook_event",
         kwargs={"event_id": int(event_id)},
     )
-    print(f"Enqueued Celery task tasks.process_webhook_event id={result.id} event_id={event_id}")
+    log_event(
+        logger,
+        logging.INFO,
+        "webhook.enqueued",
+        event_id=int(event_id),
+        task_id=result.id,
+        task_name="tasks.process_webhook_event",
+    )
 
 
 def _persist_webhook_event_threadsafe(raw_body_text: str, data: dict | None) -> tuple[str, int | None]:
@@ -65,6 +115,13 @@ def _persist_webhook_event_threadsafe(raw_body_text: str, data: dict | None) -> 
         return persisted.get("status_tag"), persisted.get("event_id")
     except Exception:
         db.rollback()
+        log_event(
+            logger,
+            logging.ERROR,
+            "webhook.persist_failed",
+            payload_size=len(raw_body_text),
+            payload_type=type(data).__name__ if data is not None else None,
+        )
         raise
     finally:
         db.close()
@@ -139,9 +196,10 @@ def verify_webhook(request: Request):
 
     if mode and token:
         if mode == "subscribe" and token == VERIFY_TOKEN:
-            print("WEBHOOK_VERIFIED")
+            log_event(logger, logging.INFO, "webhook.verify_success")
             return int(challenge)
         else:
+            log_event(logger, logging.WARNING, "webhook.verify_token_mismatch")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Verification token mismatch",
@@ -165,16 +223,23 @@ async def receive_message(request: Request):
     except Exception:
         data = None
         status_tag = "BAD_JSON"
-        print("⚠️ Failed to parse JSON")
-        print(raw_body_text)
+        log_event(
+            logger,
+            logging.WARNING,
+            "webhook.bad_json",
+            payload_size=len(raw_body_text),
+            preview=raw_body_text[:300],
+        )
 
-    print("\n================ WEBHOOK EVENT ================")
-    print("Timestamp:", datetime.utcnow().isoformat())
-    if data is not None:
-        print(json.dumps(data, indent=2))
-    else:
-        print(raw_body_text)
-    print("==============================================\n")
+    log_event(
+        logger,
+        logging.INFO,
+        "webhook.received",
+        timestamp=datetime.utcnow().isoformat(),
+        status_tag=status_tag,
+        payload_size=len(raw_body_text),
+        source=(data.get("object") if isinstance(data, dict) else None),
+    )
 
     status_tag, persisted_event_id = await to_thread.run_sync(
         _persist_webhook_event_threadsafe,
@@ -182,12 +247,26 @@ async def receive_message(request: Request):
         data if isinstance(data, dict) else None,
     )
 
+    log_event(
+        logger,
+        logging.INFO,
+        "webhook.persisted",
+        status_tag=status_tag,
+        persisted_event_id=persisted_event_id,
+    )
+
     if status_tag == "EVENT_RECEIVED" and isinstance(data, dict) and persisted_event_id:
         try:
             await to_thread.run_sync(_enqueue_webhook_processing, int(persisted_event_id))
         except Exception as exc:
             # Do not fail webhook response if queueing fails.
-            print(f"⚠️ Failed to enqueue process_webhook_event for event_id={persisted_event_id}: {exc}")
+            log_event(
+                logger,
+                logging.ERROR,
+                "webhook.enqueue_failed",
+                persisted_event_id=persisted_event_id,
+                error=str(exc),
+            )
 
     if status_tag == "BAD_JSON":
         return {"status": "BAD_JSON"}
