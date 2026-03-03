@@ -1,7 +1,9 @@
 import os
 import logging
+import json
 from typing import Any, Dict, Optional
 from datetime import datetime, timedelta
+import redis
 from sqlalchemy import or_
 
 from celery import Task
@@ -9,7 +11,8 @@ from celery import Task
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.core.logging import get_logger, log_event
-from app.db.models import ActivityLog, PaymentEvent, WebhookEvent
+from app.core.websockets import REDIS_URL
+from app.db.models import ActivityLog, Lead, PaymentEvent, WebhookEvent
 from app.services.event_handlers import handle_event_received
 from app.services.post_leads_to_meta import post_meta_event_by_id
 from utils import append_chat_message, automation_mail
@@ -20,6 +23,32 @@ class BaseDBTask(Task):
 
 
 logger = get_logger(__name__)
+
+
+def _publish_new_message(lead_id: int, payload: Dict[str, Any]) -> None:
+    if not lead_id:
+        return
+    try:
+        redis_client = redis.Redis.from_url(REDIS_URL or "redis://localhost:6379/0")
+        redis_client.publish(
+            "chat_broadcasts",
+            json.dumps({"lead_id": int(lead_id), "payload": payload}),
+        )
+        redis_client.close()
+        log_event(
+            logger,
+            logging.INFO,
+            "websocket.publish_success",
+            lead_id=int(lead_id),
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            logging.ERROR,
+            "websocket.publish_failed",
+            lead_id=int(lead_id),
+            error=str(exc),
+        )
 
 
 def _repeat_count(task_name: str, default: int = 3) -> int:
@@ -108,6 +137,14 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
         event.last_error = None
         db.commit()
 
+        lead_result = summary.get("lead_result") if isinstance(summary, dict) else None
+        lead_id = int(lead_result["lead_id"]) if isinstance(lead_result, dict) and lead_result.get("lead_id") else None
+        inbound_messages = summary.get("saved_inbound_messages") if isinstance(summary, dict) else []
+        if lead_id and isinstance(inbound_messages, list):
+            for payload in inbound_messages:
+                if isinstance(payload, dict):
+                    _publish_new_message(lead_id, payload)
+
         async_jobs = summary.get("async_jobs") or []
         enqueued_task_ids: list[str] = []
         for job in async_jobs:
@@ -171,7 +208,7 @@ def send_automation_reply(self, *, igsid: str, message_text: Optional[str] = Non
         if response is None:
             raise RuntimeError(f"automation_mail failed for igsid={igsid}")
 
-        append_chat_message(
+        msg = append_chat_message(
             db,
             igsid=str(igsid),
             direction="outbound",
@@ -180,6 +217,18 @@ def send_automation_reply(self, *, igsid: str, message_text: Optional[str] = Non
             payload=response if isinstance(response, dict) else None,
         )
         db.commit()
+
+        lead = db.query(Lead).filter(Lead.contact_id == int(msg.contact_id)).first()
+        if lead:
+            message_payload = {
+                "id": int(msg.id),
+                "text": msg.text_cleaned or msg.text_raw or "📷 [Media/Attachment]",
+                "direction": msg.direction,
+                "time": msg.created_at.strftime("%I:%M %p") if msg.created_at else None,
+                "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+                "type": "new_message",
+            }
+            _publish_new_message(int(lead.id), message_payload)
 
         return {
             "status": "sent",

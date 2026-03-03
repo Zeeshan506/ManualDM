@@ -1,4 +1,5 @@
 from fastapi import BackgroundTasks, Depends, HTTPException, Query, status, APIRouter
+import asyncio
 from pydantic import BaseModel
 from sqlalchemy.orm import joinedload, Session
 from app.core.database import get_db
@@ -13,14 +14,25 @@ from app.db.models import Lead, Message, Contact, Invoice, MetaConversionEvent, 
 from app.db.models import PaymentEvent
 from app.services.meta_conversion_events import persist_purchase_event_for_lead
 from app.services.activity_logs import enqueue_activity_log
+from fastapi import WebSocket, WebSocketDisconnect
+from app.core.websockets import manager
+from utils import append_chat_message, automation_mail
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
+
+
+
+
 
 
 class CustomLeadPaymentPayload(BaseModel):
     amount: float
     currency: str = "USD"
     send_now: bool = True
+
+
+class CustomMessagePayload(BaseModel):
+    message_text: str
 
 
 def _ensure_lead_payment_access(*, lead: Lead, current_user: User) -> None:
@@ -286,6 +298,89 @@ def get_lead_messages(lead_id: int, db: Session = Depends(get_db)):
         })
 
     return response_data
+
+
+@router.post("/leads/{lead_id}/messages/custom")
+async def send_custom_message(
+    lead_id: int,
+    body: CustomMessagePayload,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to send messages",
+        )
+
+    message_text = (body.message_text or "").strip()
+    if not message_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="message_text is required",
+        )
+
+    lead = db.query(Lead).options(joinedload(Lead.contact)).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    igsid = lead.contact.igsid if lead.contact and lead.contact.igsid else None
+    if not igsid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lead does not have a valid Instagram sender id",
+        )
+
+    response = automation_mail(str(igsid), message_text=message_text)
+    if response is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to send message to Instagram",
+        )
+
+    try:
+        msg = append_chat_message(
+            db,
+            igsid=str(igsid),
+            direction="outbound",
+            message_text=message_text,
+            platform_message_id=(response.get("message_id") if isinstance(response, dict) else None),
+            payload=response if isinstance(response, dict) else None,
+        )
+        db.commit()
+        db.refresh(msg)
+    except Exception:
+        db.rollback()
+        raise
+
+    new_message_payload = {
+        "id": int(msg.id),
+        "text": msg.text_cleaned or msg.text_raw or "📷 [Media/Attachment]",
+        "direction": msg.direction,
+        "time": msg.created_at.strftime("%I:%M %p") if msg.created_at else None,
+        "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+        "type": "new_message",
+    }
+    asyncio.create_task(manager.publish_message(lead_id=int(lead.id), payload=new_message_payload))
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="SEND_CUSTOM_MESSAGE",
+        details=f"Sent custom message for lead #{lead.id}",
+        lead_id=lead.id,
+        metadata={"message_id": int(msg.id), "platform_message_id": msg.platform_message_id},
+    )
+
+    return {
+        "status": "sent",
+        "lead_id": int(lead.id),
+        "message": new_message_payload,
+    }
 
 
 @router.get("/dashboard/stats")
@@ -650,3 +745,16 @@ def get_lead_payments(
         "total_paid_amount": float(total_paid_amount),
         "items": items,
     }
+
+@router.websocket("/ws/leads/{lead_id}")
+async def websocket_endpoint(websocket: WebSocket, lead_id: int):
+    # Note: In production, you'll want to extract the auth token from query params 
+    # or headers here to verify `get_current_user` logic.
+    await manager.connect(websocket, lead_id)
+    try:
+        while True:
+            # We just keep the connection alive. The client doesn't need to send anything
+            # because the server pushes updates via Redis.
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, lead_id)

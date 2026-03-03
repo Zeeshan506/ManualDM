@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Lead
 from app.services.meta_conversion_events import persist_contact_event_for_lead
-from utils import upsert_lead_from_payload, track_inbound_chat_history
+from utils import upsert_lead_from_payload, track_inbound_chat_history_messages
 
 
 def has_referral(data: dict) -> bool:
@@ -27,6 +27,7 @@ def handle_event_received(data: dict, db: Session) -> dict:
     result: dict = {
         "lead_result": None,
         "saved_inbound_count": 0,
+        "saved_inbound_messages": [],
         "async_jobs": [],
         "enqueue_reasons": [],
     }
@@ -60,13 +61,26 @@ def handle_event_received(data: dict, db: Session) -> dict:
             )
             result["enqueue_reasons"].append("referral_contact")
 
-        saved = track_inbound_chat_history(
+        saved_messages = track_inbound_chat_history_messages(
             data,
             igsid=lead_result["igsid"],
             db=db,
         )
-        result["saved_inbound_count"] = saved
-        print(f"Inbound chat messages saved: {saved}")
+        saved_payloads = [
+            {
+                "id": int(msg.id),
+                "text": msg.text_cleaned or msg.text_raw or "📷 [Media/Attachment]",
+                "direction": msg.direction,
+                "time": msg.created_at.strftime("%I:%M %p") if msg.created_at else None,
+                "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+                "type": "new_message",
+            }
+            for msg in saved_messages
+        ]
+
+        result["saved_inbound_messages"] = saved_payloads
+        result["saved_inbound_count"] = len(saved_payloads)
+        print(f"Inbound chat messages saved: {len(saved_payloads)}")
     else:
         print("No sender id found in payload - nothing to upsert or reply to")
 

@@ -401,6 +401,13 @@ def append_chat_message(
 
 def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session) -> int:
     """
+    Backward-compatible wrapper that persists inbound messages and returns count.
+    """
+    return len(track_inbound_chat_history_messages(payload, igsid=igsid, db=db))
+
+
+def track_inbound_chat_history_messages(payload: Dict[str, Any], igsid: str, db: Session) -> List[Message]:
+    """
     Persist inbound messages from payload for the given IGSID.
 
     Args:
@@ -409,13 +416,13 @@ def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session)
         db: Database session
 
     Returns:
-        Number of created Message rows.
+        List of created Message rows.
     """
     inbound = _extract_inbound_messages(payload)
     if not inbound:
-        return 0
+        return []
 
-    created = 0
+    created_messages: List[Message] = []
     now = datetime.utcnow()
     contact = db.query(Contact).filter(Contact.igsid == str(igsid)).first()
     if not contact:
@@ -440,10 +447,10 @@ def track_inbound_chat_history(payload: Dict[str, Any], igsid: str, db: Session)
             created_at=now,
         )
         db.add(m)
-        created += 1
+        created_messages.append(m)
 
-    if created:
+    if created_messages:
         contact.last_message_at = now
 
     db.flush()
-    return created
+    return created_messages

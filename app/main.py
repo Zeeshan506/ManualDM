@@ -27,12 +27,25 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.admin import router as admin_router
 from app.api.routes.users import router as users_router
 
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from app.core.websockets import manager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start the Redis Pub/Sub listener when the server starts
+    await manager.start_redis_listener()
+    yield
+    # Clean up on shutdown
+    await manager.stop_redis_listener()
+    await manager.redis.close()
 
 configure_logging()
 logger = get_logger(__name__)
 
+app = FastAPI(lifespan=lifespan)
 
-app = FastAPI()
 
 frontend_url = (os.getenv("FRONTEND_URL") or "").strip().rstrip("/")
 allowed_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
@@ -551,6 +564,9 @@ def create_lead_meta_event(
         "queued_for_meta": bool(body.send_now),
         "task_id": task_id,
     }
+
+
+
 
 
 if __name__ == "__main__":
