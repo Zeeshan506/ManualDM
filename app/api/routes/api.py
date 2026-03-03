@@ -335,12 +335,39 @@ async def send_custom_message(
             detail="Lead does not have a valid Instagram sender id",
         )
 
+    print(
+        "[CUSTOM_SEND] attempt",
+        {
+            "lead_id": int(lead_id),
+            "igsid": str(igsid),
+            "actor_user_id": int(current_user.id),
+            "actor_username": str(current_user.username),
+            "message_length": len(message_text),
+        },
+    )
+
     response = automation_mail(str(igsid), message_text=message_text)
     if response is None:
+        print(
+            "[CUSTOM_SEND] failed",
+            {
+                "lead_id": int(lead_id),
+                "igsid": str(igsid),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to send message to Instagram",
         )
+
+    print(
+        "[CUSTOM_SEND] success",
+        {
+            "lead_id": int(lead_id),
+            "igsid": str(igsid),
+            "message_id": response.get("message_id") if isinstance(response, dict) else None,
+        },
+    )
 
     try:
         msg = append_chat_message(

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -41,19 +42,52 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
     Returns:
         Parsed JSON response on success, or None on failure / missing configuration.
     """
-    access_token = _get_env("IG_ACCESS_TOKEN_ZESHAN6A") or _get_env("IG_ACCESS_TOKEN")
+    started = time.perf_counter()
+    print(
+        "[IG_SEND] start",
+        {
+            "psid": str(psid),
+            "has_custom_message": bool(message_text),
+            "custom_message_length": len(message_text or ""),
+        },
+    )
+
+    access_token_zeeshan = _get_env("IG_ACCESS_TOKEN_ZESHAN6A")
+    access_token_fallback = _get_env("IG_ACCESS_TOKEN")
+    access_token = access_token_zeeshan or access_token_fallback
     ig_account_id = _get_env("IG_ACCOUNT_ID")
     graph_version = _get_env("IG_GRAPH_VERSION")
     messaging_product = _get_env("IG_MESSAGING_PRODUCT")
     default_auto_reply = _get_env("IG_AUTOREPLY_TEXT")
 
+    print(
+        "[IG_SEND] env_values",
+        {
+            "IG_ACCESS_TOKEN_ZESHAN6A": access_token_zeeshan,
+            "IG_ACCESS_TOKEN": access_token_fallback,
+            "resolved_access_token": access_token,
+            "IG_ACCOUNT_ID": ig_account_id,
+            "IG_GRAPH_VERSION": graph_version,
+            "IG_MESSAGING_PRODUCT": messaging_product,
+            "IG_AUTOREPLY_TEXT": default_auto_reply,
+        },
+    )
+
     if not (access_token and ig_account_id and graph_version and messaging_product):
-        print("Missing required IG env vars (ACCESS_TOKEN, ACCOUNT_ID, GRAPH_VERSION, MESSAGING_PRODUCT).")
+        print(
+            "[IG_SEND] missing_env",
+            {
+                "has_access_token": bool(access_token),
+                "has_ig_account_id": bool(ig_account_id),
+                "has_graph_version": bool(graph_version),
+                "has_messaging_product": bool(messaging_product),
+            },
+        )
         return None
 
     final_text = message_text or default_auto_reply
     if not final_text:
-        print("Missing auto-reply text. Set IG_AUTOREPLY_TEXT or pass message_text.")
+        print("[IG_SEND] missing_message_text", {"psid": str(psid)})
         return None
 
     api_url = f"https://graph.instagram.com/v{graph_version}/{ig_account_id}/messages"
@@ -65,12 +99,71 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
         "message": {"text": final_text},
     }
 
+    masked_token = f"***{access_token[-6:]}" if len(access_token) >= 6 else "***"
+    print(
+        "[IG_SEND] request_prepared",
+        {
+            "url": api_url,
+            "graph_version": graph_version,
+            "ig_account_id": str(ig_account_id),
+            "messaging_product": messaging_product,
+            "recipient_id": str(psid),
+            "text_length": len(final_text),
+            "access_token_masked": masked_token,
+            "payload_preview": {
+                "messaging_product": payload.get("messaging_product"),
+                "recipient": payload.get("recipient"),
+                "message_text_preview": final_text[:120],
+            },
+        },
+    )
+
     try:
+        network_started = time.perf_counter()
         resp = requests.post(api_url, headers=headers, params=params, json=payload, timeout=15)
+        network_duration_ms = round((time.perf_counter() - network_started) * 1000, 2)
+        content_type = resp.headers.get("content-type", "")
+        body_preview = resp.text[:1000] if resp.text else ""
+        print(
+            "[IG_SEND] response_received",
+            {
+                "status_code": resp.status_code,
+                "ok": resp.ok,
+                "network_duration_ms": network_duration_ms,
+                "content_type": content_type,
+                "response_preview": body_preview,
+            },
+        )
         resp.raise_for_status()
-        return resp.json()
+        parsed = resp.json()
+        total_duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        print(
+            "[IG_SEND] success",
+            {
+                "psid": str(psid),
+                "message_id": parsed.get("message_id") if isinstance(parsed, dict) else None,
+                "total_duration_ms": total_duration_ms,
+            },
+        )
+        return parsed
     except requests.exceptions.RequestException as exc:
-        print(f"Failed to send message to IGSID {psid}: {exc}")
+        response_text = ""
+        status_code = None
+        if getattr(exc, "response", None) is not None:
+            status_code = exc.response.status_code
+            response_text = (exc.response.text or "")[:1000]
+
+        total_duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        print(
+            "[IG_SEND] failed",
+            {
+                "psid": str(psid),
+                "error": str(exc),
+                "status_code": status_code,
+                "response_preview": response_text,
+                "total_duration_ms": total_duration_ms,
+            },
+        )
         return None
 
 

@@ -204,9 +204,26 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
 def send_automation_reply(self, *, igsid: str, message_text: Optional[str] = None) -> Dict[str, Any]:
     db = SessionLocal()
     try:
+        log_event(
+            logger,
+            logging.INFO,
+            "task.send_automation_reply.attempt",
+            igsid=str(igsid),
+            has_custom_message=bool(message_text),
+            custom_message_length=len(message_text or ""),
+        )
+
         response = automation_mail(igsid, message_text=message_text)
         if response is None:
             raise RuntimeError(f"automation_mail failed for igsid={igsid}")
+
+        log_event(
+            logger,
+            logging.INFO,
+            "task.send_automation_reply.sent",
+            igsid=str(igsid),
+            message_id=response.get("message_id") if isinstance(response, dict) else None,
+        )
 
         msg = append_chat_message(
             db,
