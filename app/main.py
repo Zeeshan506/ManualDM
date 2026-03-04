@@ -394,7 +394,6 @@ def update_lead_contact_details(
                 lead_id=int(lead.id),
                 email=lead.email,
                 phone=lead.phone,
-                mock_invoice_id=f"mock-invoice-{lead.id}",
             )
             if leadsubmitted_event:
                 leadsubmitted_event_id = int(leadsubmitted_event.id)

@@ -16,6 +16,7 @@ class ConnectionManager:
         # Stores connections for THIS specific server worker
         # Format: { lead_id: [websocket1, websocket2] }
         self.active_connections: Dict[int, List[WebSocket]] = {}
+        self.notification_connections: List[WebSocket] = []
         
         # Async Redis client for Pub/Sub
         self.redis = redis.from_url(redis_url, decode_responses=True)
@@ -25,6 +26,7 @@ class ConnectionManager:
     async def start_redis_listener(self):
         """Starts a background task to listen for broadcasts from other workers."""
         await self.pubsub.subscribe("chat_broadcasts")
+        await self.pubsub.subscribe("system_notifications")
         self.listen_task = asyncio.create_task(self._listen())
 
     async def stop_redis_listener(self):
@@ -37,6 +39,7 @@ class ConnectionManager:
             self.listen_task = None
 
         await self.pubsub.unsubscribe("chat_broadcasts")
+        await self.pubsub.unsubscribe("system_notifications")
         await self.pubsub.close()
 
     async def _listen(self):
@@ -44,16 +47,24 @@ class ConnectionManager:
         async for message in self.pubsub.listen():
             if message["type"] == "message":
                 data = json.loads(message["data"])
-                lead_id = data.get("lead_id")
-                
-                # If this specific worker has users looking at this lead, send it!
-                if lead_id in self.active_connections:
-                    for connection in list(self.active_connections[lead_id]):
+                channel = message.get("channel")
+
+                if channel == "chat_broadcasts":
+                    lead_id = data.get("lead_id")
+
+                    if lead_id in self.active_connections:
+                        for connection in list(self.active_connections[lead_id]):
+                            try:
+                                await connection.send_json(data["payload"])
+                            except Exception:
+                                self.disconnect(connection, lead_id)
+
+                elif channel == "system_notifications":
+                    for connection in list(self.notification_connections):
                         try:
-                            await connection.send_json(data["payload"])
+                            await connection.send_json(data)
                         except Exception:
-                            # Handle disconnected clients gracefully
-                            self.disconnect(connection, lead_id)
+                            self.disconnect_notifications(connection)
 
     async def connect(self, websocket: WebSocket, lead_id: int):
         await websocket.accept()
@@ -67,6 +78,14 @@ class ConnectionManager:
                 self.active_connections[lead_id].remove(websocket)
             if not self.active_connections[lead_id]:
                 del self.active_connections[lead_id]
+
+    async def connect_notifications(self, websocket: WebSocket):
+        await websocket.accept()
+        self.notification_connections.append(websocket)
+
+    def disconnect_notifications(self, websocket: WebSocket):
+        if websocket in self.notification_connections:
+            self.notification_connections.remove(websocket)
 
     async def publish_message(self, lead_id: int, payload: dict):
         """Called by your REST APIs/Webhooks to announce a new message."""

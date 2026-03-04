@@ -14,6 +14,7 @@ from app.core.logging import get_logger, log_event
 from app.core.websockets import REDIS_URL
 from app.db.models import ActivityLog, Lead, PaymentEvent, WebhookEvent
 from app.services.event_handlers import handle_event_received
+from app.services.notifications import build_notification_payload, create_notification_event, publish_notification_payload
 from app.services.post_leads_to_meta import post_meta_event_by_id
 from utils import append_chat_message, automation_mail
 
@@ -49,6 +50,27 @@ def _publish_new_message(lead_id: int, payload: Dict[str, Any]) -> None:
             lead_id=int(lead_id),
             error=str(exc),
         )
+
+
+def _build_incoming_message_notification(*, lead: Lead | None, lead_id: int, message_payload: Dict[str, Any]) -> tuple[str, str | None, Dict[str, Any]]:
+    lead_name = (lead.name or "").strip() if lead else ""
+    lead_label = lead_name or f"Lead #{lead_id}"
+
+    raw_text = message_payload.get("text") if isinstance(message_payload, dict) else None
+    text = str(raw_text).strip() if raw_text is not None else ""
+    body = text if text else "📩 New incoming message"
+
+    if len(body) > 140:
+        body = f"{body[:137]}..."
+
+    title = f"New message from {lead_label}"
+    payload = {
+        "message_id": message_payload.get("id") if isinstance(message_payload, dict) else None,
+        "direction": message_payload.get("direction") if isinstance(message_payload, dict) else None,
+        "lead_id": int(lead_id),
+    }
+
+    return title, body, payload
 
 
 def _repeat_count(task_name: str, default: int = 3) -> int:
@@ -141,9 +163,27 @@ def process_webhook_event(self, *, event_id: int) -> Dict[str, Any]:
         lead_id = int(lead_result["lead_id"]) if isinstance(lead_result, dict) and lead_result.get("lead_id") else None
         inbound_messages = summary.get("saved_inbound_messages") if isinstance(summary, dict) else []
         if lead_id and isinstance(inbound_messages, list):
+            lead = db.query(Lead).filter(Lead.id == int(lead_id)).first()
             for payload in inbound_messages:
                 if isinstance(payload, dict):
                     _publish_new_message(lead_id, payload)
+
+                    if payload.get("direction") == "inbound":
+                        title, body, notification_payload = _build_incoming_message_notification(
+                            lead=lead,
+                            lead_id=int(lead_id),
+                            message_payload=payload,
+                        )
+                        notification = create_notification_event(
+                            db,
+                            event_type="incoming_message",
+                            title=title,
+                            body=body,
+                            lead_id=int(lead_id),
+                            payload=notification_payload,
+                        )
+                        db.commit()
+                        publish_notification_payload(build_notification_payload(notification))
 
         async_jobs = summary.get("async_jobs") or []
         enqueued_task_ids: list[str] = []

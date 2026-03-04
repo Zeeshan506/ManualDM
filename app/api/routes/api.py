@@ -10,7 +10,7 @@ import uuid
 
 from app.core.celery_app import celery_app
 from app.core.dependencies import get_current_user
-from app.db.models import Lead, Message, Contact, Invoice, MetaConversionEvent, User
+from app.db.models import Lead, Message, Contact, Invoice, MetaConversionEvent, User, NotificationEvent
 from app.db.models import PaymentEvent
 from app.services.meta_conversion_events import persist_purchase_event_for_lead
 from app.services.activity_logs import enqueue_activity_log
@@ -298,6 +298,40 @@ def get_lead_messages(lead_id: int, db: Session = Depends(get_db)):
         })
 
     return response_data
+
+
+@router.get("/notifications")
+def get_notifications(
+    limit: int = Query(25, ge=1, le=100, description="Maximum notifications to return"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in {"sales_rep", "admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view notifications",
+        )
+
+    rows = (
+        db.query(NotificationEvent)
+        .order_by(NotificationEvent.created_at.desc(), NotificationEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return [
+        {
+            "id": int(row.id),
+            "event_type": row.event_type,
+            "title": row.title,
+            "body": row.body,
+            "lead_id": row.lead_id,
+            "payload": row.payload,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "type": "system_notification",
+        }
+        for row in rows
+    ]
 
 
 @router.post("/leads/{lead_id}/messages/custom")
@@ -785,3 +819,13 @@ async def websocket_endpoint(websocket: WebSocket, lead_id: int):
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, lead_id)
+
+
+@router.websocket("/ws/notifications")
+async def notifications_websocket_endpoint(websocket: WebSocket):
+    await manager.connect_notifications(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_notifications(websocket)

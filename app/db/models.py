@@ -229,3 +229,20 @@ class ActivityLog(Base):
     details = Column(Text, nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)
+
+
+class NotificationEvent(Base):
+    __tablename__ = "notification_events"
+
+    id = Column(Integer, primary_key=True)
+
+    event_type = Column(String, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    body = Column(Text, nullable=True)
+
+    lead_id = Column(Integer, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True)
+    payload = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True)
+
+    lead = relationship("Lead", backref="notification_events")

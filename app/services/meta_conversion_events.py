@@ -151,7 +151,6 @@ def _build_leadsubmitted_payload(
     igsid: str,
     hashed_email: str,
     hashed_phone: str,
-    mock_invoice_id: Optional[str] = None,
     referral: Optional[Dict[str, Any]] = None,
     event_time: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -166,12 +165,12 @@ def _build_leadsubmitted_payload(
         user_data["ig_account_id"] = str(IG_BUSINESS_ACCOUNT_ID)
 
     event["user_data"] = user_data
-    event["custom_data"] = {
-        "mock_invoice_generated": True,
-        "mock_invoice_id": mock_invoice_id or f"mock-invoice-{lead.id}-{int(datetime.utcnow().timestamp())}",
-    }
+    event["custom_data"] = {}
     if referral:
         event["custom_data"]["referral"] = referral
+
+    if not event["custom_data"]:
+        event.pop("custom_data", None)
 
     return {"data": [event]}
 
@@ -298,7 +297,6 @@ def persist_leadsubmitted_event_for_lead(
     lead_id: int,
     email: Optional[str] = None,
     phone: Optional[str] = None,
-    mock_invoice_id: Optional[str] = None,
     event_time: Optional[int] = None,
 ) -> Optional[MetaConversionEvent]:
     lead = db.query(Lead).filter(Lead.id == lead_id).first()
@@ -333,7 +331,6 @@ def persist_leadsubmitted_event_for_lead(
         igsid=str(igsid),
         hashed_email=hashed_email,
         hashed_phone=hashed_phone,
-        mock_invoice_id=mock_invoice_id,
         referral=referral,
         event_time=event_time,
     )
