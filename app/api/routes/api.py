@@ -1,8 +1,10 @@
 from fastapi import BackgroundTasks, Depends, HTTPException, Query, status, APIRouter
 import asyncio
+import logging
 from pydantic import BaseModel
 from sqlalchemy.orm import joinedload, Session
 from app.core.database import get_db
+from app.core.logging import get_logger, log_event
 from sqlalchemy import func
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -19,6 +21,7 @@ from app.core.websockets import manager
 from utils import append_chat_message, automation_mail
 
 router = APIRouter(prefix="/api", tags=["API Endpoints"])
+logger = get_logger(__name__)
 
 
 
@@ -63,6 +66,16 @@ def _lead_engagement_payload(lead: Lead) -> dict:
         "engagedByUserId": lead.assigned_to,
         "engagedByUsername": owner_username,
         "isEngaged": is_occupied,
+    }
+
+
+def _lead_dead_payload(lead: Lead) -> dict:
+    return {
+        "deadRequested": bool(lead.dead_requested),
+        "deadRequestedByUserId": lead.dead_requested_by_user_id,
+        "deadRequestedAt": lead.dead_requested_at.isoformat() if lead.dead_requested_at else None,
+        "deadMarkedByUserId": lead.dead_marked_by_user_id,
+        "deadMarkedAt": lead.dead_marked_at.isoformat() if lead.dead_marked_at else None,
     }
 
 @router.get("/leads")
@@ -120,6 +133,7 @@ def get_all_leads(
             "phone": lead.phone or "",
             "lastActive": last_active.isoformat() if last_active else None,
             **_lead_engagement_payload(lead),
+            **_lead_dead_payload(lead),
         })
 
     # Sort the results so the most recently active leads are at the top
@@ -259,6 +273,173 @@ def get_lead_details(lead_id: int, db: Session = Depends(get_db)):
         "metaEventFired": capi_synced,
         "createdAt": lead.created_at.isoformat(),
         **_lead_engagement_payload(lead),
+        **_lead_dead_payload(lead),
+    }
+
+
+@router.post("/leads/{lead_id}/dead-request")
+def request_lead_dead(
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role != "sales_rep":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only sales reps can request marking a lead as dead",
+        )
+
+    lead = db.query(Lead).options(joinedload(Lead.contact), joinedload(Lead.assignee)).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    if lead.status == "dead":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lead is already marked as dead",
+        )
+
+    now_utc = datetime.utcnow()
+    lead.dead_requested = True
+    lead.dead_requested_by_user_id = current_user.id
+    lead.dead_requested_at = now_utc
+    db.commit()
+    db.refresh(lead)
+
+    notification = NotificationEvent(
+        event_type="lead_dead_request",
+        title="Lead dead request",
+        body=f"{current_user.username} requested lead #{lead.id} to be marked dead.",
+        lead_id=lead.id,
+        payload={
+            "lead_id": lead.id,
+            "requested_by": current_user.username,
+            "requested_by_user_id": current_user.id,
+            "type": "lead_dead_request",
+        },
+        created_at=now_utc,
+    )
+    db.add(notification)
+    db.commit()
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="REQUEST_DEAD_LEAD",
+        details=f"Requested dead mark for lead #{lead.id}",
+        lead_id=lead.id,
+        metadata={"requested_by_user_id": current_user.id},
+    )
+
+    return {
+        "status": "requested",
+        "lead_id": lead.id,
+        **_lead_dead_payload(lead),
+    }
+
+
+@router.post("/leads/{lead_id}/mark-dead")
+def mark_lead_dead(
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in {"admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can mark a lead as dead",
+        )
+
+    lead = db.query(Lead).options(joinedload(Lead.contact), joinedload(Lead.assignee)).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    now_utc = datetime.utcnow()
+    lead.status = "dead"
+    lead.lead_status = "unassigned"
+    lead.dead_requested = False
+    lead.dead_marked_by_user_id = current_user.id
+    lead.dead_marked_at = now_utc
+    db.commit()
+    db.refresh(lead)
+
+    notification = NotificationEvent(
+        event_type="lead_marked_dead",
+        title="Lead marked dead",
+        body=f"{current_user.username} marked lead #{lead.id} as dead.",
+        lead_id=lead.id,
+        payload={
+            "lead_id": lead.id,
+            "marked_by": current_user.username,
+            "marked_by_user_id": current_user.id,
+            "type": "lead_marked_dead",
+        },
+        created_at=now_utc,
+    )
+    db.add(notification)
+    db.commit()
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="MARK_DEAD_LEAD",
+        details=f"Marked lead #{lead.id} as dead",
+        lead_id=lead.id,
+        metadata={"marked_by_user_id": current_user.id},
+    )
+
+    return {
+        "status": "dead",
+        "lead_id": lead.id,
+        "lead_status": lead.status,
+        **_lead_dead_payload(lead),
+    }
+
+
+@router.delete("/leads/{lead_id}")
+def delete_lead_record(
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in {"admin", "sudo_admin"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can delete leads",
+        )
+
+    lead = db.query(Lead).filter(Lead.id == lead_id).first()
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Lead {lead_id} not found",
+        )
+
+    lead_id_value = int(lead.id)
+    db.delete(lead)
+    db.commit()
+
+    enqueue_activity_log(
+        background_tasks,
+        actor=current_user.username,
+        action="DELETE_LEAD",
+        details=f"Deleted lead #{lead_id_value}",
+        lead_id=lead_id_value,
+        metadata={"deleted_by_user_id": current_user.id},
+    )
+
+    return {
+        "status": "deleted",
+        "lead_id": lead_id_value,
     }
 
 
@@ -369,38 +550,38 @@ async def send_custom_message(
             detail="Lead does not have a valid Instagram sender id",
         )
 
-    print(
-        "[CUSTOM_SEND] attempt",
-        {
-            "lead_id": int(lead_id),
-            "igsid": str(igsid),
-            "actor_user_id": int(current_user.id),
-            "actor_username": str(current_user.username),
-            "message_length": len(message_text),
-        },
+    log_event(
+        logger,
+        logging.INFO,
+        "custom_message.send_attempt",
+        lead_id=int(lead_id),
+        igsid=str(igsid),
+        actor_user_id=int(current_user.id),
+        actor_username=str(current_user.username),
+        message_length=len(message_text),
     )
 
     response = automation_mail(str(igsid), message_text=message_text)
     if response is None:
-        print(
-            "[CUSTOM_SEND] failed",
-            {
-                "lead_id": int(lead_id),
-                "igsid": str(igsid),
-            },
+        log_event(
+            logger,
+            logging.WARNING,
+            "custom_message.send_failed",
+            lead_id=int(lead_id),
+            igsid=str(igsid),
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to send message to Instagram",
         )
 
-    print(
-        "[CUSTOM_SEND] success",
-        {
-            "lead_id": int(lead_id),
-            "igsid": str(igsid),
-            "message_id": response.get("message_id") if isinstance(response, dict) else None,
-        },
+    log_event(
+        logger,
+        logging.INFO,
+        "custom_message.send_success",
+        lead_id=int(lead_id),
+        igsid=str(igsid),
+        message_id=response.get("message_id") if isinstance(response, dict) else None,
     )
 
     try:

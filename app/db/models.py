@@ -107,7 +107,19 @@ class User(Base):
     )
     is_active = Column(Boolean, nullable=False, default=True)
 
-    assigned_leads = relationship("Lead", back_populates="assignee")
+    assigned_leads = relationship(
+        "Lead",
+        back_populates="assignee",
+        foreign_keys="Lead.assigned_to",
+    )
+    dead_requested_leads = relationship(
+        "Lead",
+        foreign_keys="Lead.dead_requested_by_user_id",
+    )
+    dead_marked_leads = relationship(
+        "Lead",
+        foreign_keys="Lead.dead_marked_by_user_id",
+    )
 
 
 class Lead(Base):
@@ -134,13 +146,40 @@ class Lead(Base):
     lead_status = Column(String, nullable=False, default="unassigned")
 
     status = Column(String, nullable=False, default="new")
+    dead_requested = Column(Boolean, nullable=False, default=False, index=True)
+    dead_requested_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    dead_requested_at = Column(DateTime(timezone=True), nullable=True)
+    dead_marked_by_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    dead_marked_at = Column(DateTime(timezone=True), nullable=True)
     referral_payload = Column(JSON, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     converted_at = Column(DateTime(timezone=True), nullable=True)
 
     contact = relationship("Contact", back_populates="lead")
-    assignee = relationship("User", back_populates="assigned_leads")
+    assignee = relationship(
+        "User",
+        back_populates="assigned_leads",
+        foreign_keys=[assigned_to],
+    )
+    dead_requested_by = relationship(
+        "User",
+        foreign_keys=[dead_requested_by_user_id],
+    )
+    dead_marked_by = relationship(
+        "User",
+        foreign_keys=[dead_marked_by_user_id],
+    )
     invoices = relationship("Invoice", back_populates="lead", cascade="all, delete-orphan")
 
 

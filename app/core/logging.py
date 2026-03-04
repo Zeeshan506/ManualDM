@@ -1,9 +1,9 @@
 import contextvars
-import json
 import logging
 import os
-from datetime import datetime, timezone
+import sys
 from typing import Any
+from loguru import logger
 
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("request_id", default=None)
 
@@ -20,46 +20,102 @@ def get_request_id() -> str | None:
     return _request_id_var.get()
 
 
-class JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-            "request_id": get_request_id(),
-        }
+def _resolve_level(level: int | str) -> str:
+    if isinstance(level, str):
+        return level.upper()
 
-        event = getattr(record, "event", None)
-        if event:
-            payload["event"] = event
+    level_mapping = {
+        logging.DEBUG: "DEBUG",
+        logging.INFO: "INFO",
+        logging.WARNING: "WARNING",
+        logging.ERROR: "ERROR",
+        logging.CRITICAL: "CRITICAL",
+    }
+    return level_mapping.get(level, "INFO")
 
-        fields = getattr(record, "fields", None)
-        if isinstance(fields, dict):
-            payload.update(fields)
 
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+class InterceptHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level_name = logger.level(record.levelname).name
+        except Exception:
+            level_name = _resolve_level(record.levelno)
 
-        return json.dumps(payload, default=str)
+        frame = logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        request_id = get_request_id() or "-"
+        log = logger.bind(
+            request_id=request_id,
+            logger_name=record.name,
+            event=record.name,
+            fields="",
+        )
+        log.opt(depth=depth, exception=record.exc_info).log(level_name, record.getMessage())
+
+
+def _format_fields(fields: dict[str, Any] | None) -> str:
+    if not fields:
+        return ""
+    items = [f"{key}={value}" for key, value in fields.items()]
+    return " | " + " ".join(items)
+
+
+def _attach_stdlib_intercept(level_name: str) -> None:
+    intercept_handler = InterceptHandler()
+    logging.basicConfig(handlers=[intercept_handler], level=0, force=True)
+    logging.root.setLevel(level_name)
+
+    forwarded_loggers = (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "fastapi",
+        "celery",
+        "celery.app.trace",
+        "kombu",
+    )
+
+    for logger_name in forwarded_loggers:
+        std_logger = logging.getLogger(logger_name)
+        std_logger.handlers = [intercept_handler]
+        std_logger.propagate = False
+        std_logger.setLevel(level_name)
 
 
 def configure_logging() -> None:
     level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
+    logger.remove()
+    logger.configure(extra={"request_id": "-", "event": "", "fields": "", "logger_name": "-"})
+    logger.add(
+        sink=sys.stdout,
+        level=level_name,
+        colorize=True,
+        backtrace=False,
+        diagnose=False,
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{extra[request_id]}</cyan> | "
+            "<blue>{extra[logger_name]}</blue> | "
+            "<magenta>{extra[event]}</magenta> | {message}{extra[fields]}"
+        ),
+    )
+    _attach_stdlib_intercept(level_name)
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
 
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
+def get_logger(name: str) -> Any:
+    return logger.bind(logger_name=name)
 
 
-def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger(name)
-
-
-def log_event(logger: logging.Logger, level: int, event: str, **fields: Any) -> None:
-    logger.log(level, event, extra={"event": event, "fields": fields})
+def log_event(logger_instance: Any, level: int | str, event: str, **fields: Any) -> None:
+    request_id = get_request_id() or "-"
+    bound_logger = logger_instance.bind(
+        request_id=request_id,
+        event=event,
+        fields=_format_fields(fields),
+    )
+    bound_logger.log(_resolve_level(level), event)

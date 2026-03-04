@@ -1,8 +1,10 @@
 import os
 
 from celery import Celery
+from celery.signals import after_setup_logger, after_setup_task_logger, setup_logging
 from kombu import Queue
 from dotenv import load_dotenv
+from app.core.logging import configure_logging
 from app.core.redis_config import get_redis_base_url, redis_url_with_db
 
 load_dotenv()
@@ -57,3 +59,18 @@ celery_app.conf.update(
         }
     },
 )
+
+
+@setup_logging.connect
+def _configure_celery_root_logging(*args, **kwargs):
+    configure_logging()
+
+
+@after_setup_logger.connect
+def _configure_celery_logger(*args, **kwargs):
+    configure_logging()
+
+
+@after_setup_task_logger.connect
+def _configure_celery_task_logger(*args, **kwargs):
+    configure_logging()
