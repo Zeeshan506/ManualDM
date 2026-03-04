@@ -2,6 +2,7 @@ from datetime import datetime
 import hashlib
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import WebhookEvent
@@ -75,7 +76,21 @@ def persist_webhook_event(raw_body_text: str, data: Any, status_tag: str, db: Se
     )
 
     db.add(event)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing_event = db.query(WebhookEvent).filter(WebhookEvent.idempotency_key == idempotency_key).first()
+        if existing_event:
+            return {
+                "status_tag": existing_event.event_type or status_tag,
+                "event_id": existing_event.id,
+                "existing": True,
+                "enqueue_status": existing_event.enqueue_status,
+                "processing_state": existing_event.processing_state,
+            }
+        raise
+
     return {
         "status_tag": status_tag,
         "event_id": event.id,
