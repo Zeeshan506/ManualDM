@@ -3,13 +3,16 @@ import os
 import re
 import logging
 import time
+from threading import Lock
 from uuid import uuid4
 from datetime import datetime, timedelta
+from collections import defaultdict, deque
 from app.services.webhook_events import persist_webhook_event
 import uvicorn
 from anyio import to_thread
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.celery_app import celery_app
@@ -28,7 +31,6 @@ from app.api.routes.admin import router as admin_router
 from app.api.routes.users import router as users_router
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
 from app.core.websockets import manager
 
 
@@ -66,6 +68,43 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(admin_router)
 
+REQUEST_WINDOW_SECONDS = int(os.getenv("REQUEST_WINDOW_SECONDS", "60"))
+LOGIN_RATE_LIMIT_PER_WINDOW = int(os.getenv("LOGIN_RATE_LIMIT_PER_WINDOW", "20"))
+WEBHOOK_RATE_LIMIT_PER_WINDOW = int(os.getenv("WEBHOOK_RATE_LIMIT_PER_WINDOW", "180"))
+WEBHOOK_VERIFY_RATE_LIMIT_PER_WINDOW = int(os.getenv("WEBHOOK_VERIFY_RATE_LIMIT_PER_WINDOW", "60"))
+WEBHOOK_MAX_BODY_BYTES = int(os.getenv("WEBHOOK_MAX_BODY_BYTES", str(1024 * 1024)))
+
+_request_buckets: dict[str, deque[float]] = defaultdict(deque)
+_request_buckets_lock = Lock()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _allow_request(bucket_key: str, limit: int, window_seconds: int) -> bool:
+    if limit <= 0:
+        return True
+
+    now = time.time()
+    window_start = now - window_seconds
+
+    with _request_buckets_lock:
+        bucket = _request_buckets[bucket_key]
+        while bucket and bucket[0] < window_start:
+            bucket.popleft()
+
+        if len(bucket) >= limit:
+            return False
+
+        bucket.append(now)
+        return True
+
 
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
@@ -89,6 +128,9 @@ async def request_logging_middleware(request: Request, call_next):
 
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     response.headers["x-request-id"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     log_event(
         logger,
         logging.INFO,
@@ -100,6 +142,49 @@ async def request_logging_middleware(request: Request, call_next):
     )
     reset_request_id(token)
     return response
+
+
+@app.middleware("http")
+async def traffic_guard_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+    ip = _client_ip(request)
+
+    if path == "/api/login" and method == "POST":
+        if not _allow_request(f"login:{ip}", LOGIN_RATE_LIMIT_PER_WINDOW, REQUEST_WINDOW_SECONDS):
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Too many login attempts. Please try again shortly."},
+                headers={"Retry-After": str(REQUEST_WINDOW_SECONDS)},
+            )
+
+    if path == "/webhook":
+        if method == "POST":
+            if not _allow_request(f"webhook:post:{ip}", WEBHOOK_RATE_LIMIT_PER_WINDOW, REQUEST_WINDOW_SECONDS):
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={"detail": "Too many webhook requests."},
+                    headers={"Retry-After": str(REQUEST_WINDOW_SECONDS)},
+                )
+
+            content_length_header = request.headers.get("content-length")
+            if content_length_header and content_length_header.isdigit():
+                content_length = int(content_length_header)
+                if content_length > WEBHOOK_MAX_BODY_BYTES:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={"detail": "Webhook payload too large."},
+                    )
+
+        if method == "GET":
+            if not _allow_request(f"webhook:get:{ip}", WEBHOOK_VERIFY_RATE_LIMIT_PER_WINDOW, REQUEST_WINDOW_SECONDS):
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={"detail": "Too many webhook verification requests."},
+                    headers={"Retry-After": str(REQUEST_WINDOW_SECONDS)},
+                )
+
+    return await call_next(request)
 
 # Configuration
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_secret_token_123")
