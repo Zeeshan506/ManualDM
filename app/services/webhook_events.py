@@ -4,8 +4,29 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.db.models import WebhookEvent
+
+
+def _is_duplicate_primary_key_error(exc: IntegrityError) -> bool:
+    message = str(getattr(exc, "orig", exc)).lower()
+    return "duplicate key value" in message and "(id)=" in message
+
+
+def _sync_webhook_events_id_sequence(db: Session) -> None:
+    sequence_name = db.execute(
+        text("SELECT pg_get_serial_sequence('webhook_events', 'id')")
+    ).scalar()
+    if not sequence_name:
+        return
+
+    db.execute(
+        text(
+            "SELECT setval(:seq, COALESCE((SELECT MAX(id) FROM webhook_events), 0) + 1, false)"
+        ),
+        {"seq": sequence_name},
+    )
 
 
 def _idempotency_key(*, source: str, external_event_id: str | None, raw_body_text: str) -> str:
@@ -78,8 +99,20 @@ def persist_webhook_event(raw_body_text: str, data: Any, status_tag: str, db: Se
     db.add(event)
     try:
         db.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
+        if _is_duplicate_primary_key_error(exc):
+            _sync_webhook_events_id_sequence(db)
+            db.add(event)
+            db.flush()
+            return {
+                "status_tag": status_tag,
+                "event_id": event.id,
+                "existing": False,
+                "enqueue_status": event.enqueue_status,
+                "processing_state": event.processing_state,
+            }
+
         existing_event = db.query(WebhookEvent).filter(WebhookEvent.idempotency_key == idempotency_key).first()
         if existing_event:
             return {
