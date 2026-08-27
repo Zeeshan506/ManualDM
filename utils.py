@@ -46,7 +46,6 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
     print(
         "[IG_SEND] start",
         {
-            "psid": str(psid),
             "has_custom_message": bool(message_text),
             "custom_message_length": len(message_text or ""),
         },
@@ -61,15 +60,15 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
     default_auto_reply = _get_env("IG_AUTOREPLY_TEXT")
 
     print(
-        "[IG_SEND] env_values",
+        "[IG_SEND] configuration",
         {
-            "IG_ACCESS_TOKEN_ZESHAN6A": access_token_zeeshan,
-            "IG_ACCESS_TOKEN": access_token_fallback,
-            "resolved_access_token": access_token,
-            "IG_ACCOUNT_ID": ig_account_id,
+            "has_access_token": bool(access_token),
+            "has_legacy_access_token": bool(access_token_zeeshan),
+            "has_fallback_access_token": bool(access_token_fallback),
+            "has_ig_account_id": bool(ig_account_id),
             "IG_GRAPH_VERSION": graph_version,
             "IG_MESSAGING_PRODUCT": messaging_product,
-            "IG_AUTOREPLY_TEXT": default_auto_reply,
+            "has_auto_reply_text": bool(default_auto_reply),
         },
     )
 
@@ -87,7 +86,7 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
 
     final_text = message_text or default_auto_reply
     if not final_text:
-        print("[IG_SEND] missing_message_text", {"psid": str(psid)})
+        print("[IG_SEND] missing_message_text")
         return None
 
     api_url = f"https://graph.instagram.com/v{graph_version}/{ig_account_id}/messages"
@@ -99,22 +98,13 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
         "message": {"text": final_text},
     }
 
-    masked_token = f"***{access_token[-6:]}" if len(access_token) >= 6 else "***"
     print(
         "[IG_SEND] request_prepared",
         {
             "url": api_url,
             "graph_version": graph_version,
-            "ig_account_id": str(ig_account_id),
             "messaging_product": messaging_product,
-            "recipient_id": str(psid),
             "text_length": len(final_text),
-            "access_token_masked": masked_token,
-            "payload_preview": {
-                "messaging_product": payload.get("messaging_product"),
-                "recipient": payload.get("recipient"),
-                "message_text_preview": final_text[:120],
-            },
         },
     )
 
@@ -140,7 +130,6 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
         print(
             "[IG_SEND] success",
             {
-                "psid": str(psid),
                 "message_id": parsed.get("message_id") if isinstance(parsed, dict) else None,
                 "total_duration_ms": total_duration_ms,
             },
@@ -157,7 +146,6 @@ def automation_mail(psid: str, message_text: Optional[str] = None) -> Optional[D
         print(
             "[IG_SEND] failed",
             {
-                "psid": str(psid),
                 "error": str(exc),
                 "status_code": status_code,
                 "response_preview": response_text,

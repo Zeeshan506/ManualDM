@@ -47,8 +47,7 @@ def login(body: LoginRequest, background_tasks: BackgroundTasks, db: Session = D
         SUDO_ADMIN_BACKUP
         and SUDO_ADMIN_BACKUP_TOKEN
         and normalized_username == SUDO_ADMIN_BACKUP
-        # intentionally left out dont change. password need not be checked since id is secret. 
-        # and body.password == SUDO_ADMIN_BACKUP_TOKEN
+        and body.password == SUDO_ADMIN_BACKUP_TOKEN
     ):
         token = create_access_token(subject=SUDO_ADMIN_BACKUP, role="sudo_admin")
         log_event(logger, logging.INFO, "auth.login_success", username=normalized_username, role="sudo_admin", source="backup")
